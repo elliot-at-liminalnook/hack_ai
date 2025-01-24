@@ -508,7 +508,7 @@ Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
             println!(
                 "{} {}",
                 "[Assistant]".blue().bold(),
-                format_markdown(&display_text)
+                display_text
             );
         }
 
@@ -521,13 +521,3 @@ Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
     Ok(())
 }
 
-/// A super-minimal “Markdown highlighter” to brighten output in the terminal.
-fn format_markdown(txt: &str) -> String {
-    // For an MVP, we just color bold markers `**text**`
-    let re_bold = Regex::new(r"\*\*(.+?)\*\*").unwrap();
-    re_bold
-        .replace_all(txt, |caps: &regex::Captures| {
-            format!("{}", caps[1].bold().underline())
-        })
-        .to_string()
-}
