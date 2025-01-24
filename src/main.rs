@@ -3,17 +3,23 @@ use colored::*;
 use html2text::from_read;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::BufRead;
-use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
+use clap::Parser;
 use tokio::time::timeout;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 use url::Url;
+
+//
+// -----------------------------------------------------------------------------
+// HTML -> Text Extraction
+// -----------------------------------------------------------------------------
 
 pub fn extract_text_from_html(html: &str, url: Option<&str>) -> String {
     let mut text = from_read(html.as_bytes(), 80).expect("Failed to parse HTML");
@@ -34,7 +40,7 @@ pub fn extract_text_from_html(html: &str, url: Option<&str>) -> String {
 
 //
 // -----------------------------------------------------------------------------
-// 1. Data Structures: Conversation, Messages, Tool Calls
+// Data Structures
 // -----------------------------------------------------------------------------
 
 /// Represents a single message in the conversation: system, user, or assistant.
@@ -46,117 +52,35 @@ pub enum Message {
     Assistant(String),
 }
 
-const MAX_ITERATIONS: usize = 10; // Maximum number of automatic follow-ups
-
-/// Process tool calls and continue until completion or max iterations
-async fn process_tool_calls(session: &mut ConversationSession, initial_response: String) -> Result<String> {
-    let mut current_response = initial_response;
-    let mut iteration = 0;
-    
-    loop {
-        iteration += 1;
-        if iteration > MAX_ITERATIONS {
-            return Ok(format!("{}: Reached maximum number of iterations ({})", 
-                "STOPPED".red().bold(), 
-                MAX_ITERATIONS
-            ));
-        }
-
-        // Check for completion condition
-        if current_response.contains("<done/>") {
-            return Ok(current_response.replace("<done/>", "").trim().to_string());
-        }
-
-        // Parse and execute tool calls
-        let tool_calls = parse_tool_calls(&current_response);
-        if tool_calls.is_empty() {
-            return Ok(current_response);
-        }
-
-        let mut tool_results_text = String::new();
-        for call in tool_calls {
-            match call {
-                ToolCall::Search { query, count, safe_search } => {
-                    let result = match run_search(&query, count, safe_search).await {
-                        Ok(r) => r,
-                        Err(e) => format!("ERROR during search: {}", e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                        query, result
-                    ));
-                }
-                ToolCall::Bash { command, args } => {
-                    let full_cmd = format!("{} {}", command, args.join(" "));
-                    let result = match run_bash_command(&full_cmd).await {
-                        Ok(r) => r,
-                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "\n{}\n{}\n",
-                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
-                        result
-                    ));
-                }
-                ToolCall::Scrape { url, render_js } => {
-                    let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
-                        Ok(r) => r,
-                        Err(e) => format!("ERROR during scrape: {}", e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
-                        url, result
-                    ));
-                }
-                ToolCall::GetVar { name } => {
-                    let result = match session.get_var(&name) {
-                        Some(value) => format!("Variable '{}': {}", name, value),
-                        None => format!("Variable '{}' not found", name),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [GET VAR result] ====\n{}\n\n",
-                        result
-                    ));
-                }
-                ToolCall::SetVar { name, value } => {
-                    session.set_var(name.clone(), value.clone());
-                    tool_results_text.push_str(&format!(
-                        "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
-                        name, value
-                    ));
-                }
-                ToolCall::ListVars => {
-                    let result = session.list_vars();
-                    tool_results_text.push_str(&format!(
-                        "==== [LIST VARS result] ====\n{}\n\n",
-                        result
-                    ));
-                }
-            }
-        }
-
-        // Add tool results to conversation
-        let tool_msg = format!("Tool results:\n{}", tool_results_text);
-        session.messages.push(Message::Assistant(tool_msg.clone()));
-
-        // Get next response from LLM
-        let next_response = timeout(Duration::from_secs(30), call_deepseek_api(session)).await??;
-        current_response = next_response;
-    }
-}
+/// We allow up to this many consecutive "steps" of calling the LLM automatically
+/// when running multi-step tasks (like chain-of-thought).
+const MAX_ITERATIONS: usize = 10;
 
 /// The entire conversation session, which we store in JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSession {
     pub messages: Vec<Message>,
-    pub variables: std::collections::HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
+
+    /// A set of small key-value variables (name -> (value, timestamp))
+    pub variables: HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
+
+    /// A flexible "long context" knowledge base, stored as JSON.
+    /// Tools and the AI can append summarized data here (e.g. discovered hosts, vulnerabilities).
+    pub long_context: Value,
+}
+
+impl Default for ConversationSession {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConversationSession {
     pub fn new() -> Self {
-        Self { 
+        Self {
             messages: vec![],
-            variables: std::collections::HashMap::new(),
+            variables: HashMap::new(),
+            long_context: Value::Object(serde_json::Map::new()),
         }
     }
 
@@ -176,13 +100,13 @@ impl ConversationSession {
         if self.variables.is_empty() {
             return "No variables stored".to_string();
         }
-        
+
         // Sort by timestamp (newest first)
         let mut vars: Vec<_> = self.variables.iter()
             .map(|(k, (v, t))| (t, k, v))
             .collect();
         vars.sort_by(|a, b| b.0.cmp(a.0));
-        
+
         vars.iter()
             .map(|(t, k, v)| format!("{}: {} (set at {})", k, v, t.format("%Y-%m-%d %H:%M:%S")))
             .collect::<Vec<_>>()
@@ -194,13 +118,13 @@ impl ConversationSession {
         if self.variables.is_empty() {
             return String::new();
         }
-        
+
         // Sort by timestamp (newest first)
         let mut vars: Vec<_> = self.variables.iter()
             .map(|(k, (v, t))| (t, k, v))
             .collect();
         vars.sort_by(|a, b| b.0.cmp(a.0));
-        
+
         // Take top 10
         vars.iter()
             .take(10)
@@ -208,45 +132,101 @@ impl ConversationSession {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// Append data to our "long_context" knowledge base. For example:
+    /// session.append_to_long_context("tool_summaries", &json!({ "timestamp": "now", "summary": "some summary" }));
+    pub fn append_to_long_context(&mut self, key: &str, value: &Value) {
+        // Ensure long_context is an object
+        let obj = self.long_context.as_object_mut().unwrap();
+
+        // If the key doesn't exist, create an empty array
+        let entry = obj.entry(key.to_string()).or_insert(Value::Array(vec![]));
+
+        // Append to array
+        if let Value::Array(arr) = entry {
+            arr.push(value.clone());
+        }
+    }
+
+    /// Return a summarized view of the long_context. For demonstration,
+    /// we'll just JSON-stringify it. In a real system, you might keep this more condensed.
+    pub fn summarize_long_context(&self) -> String {
+        let s = serde_json::to_string_pretty(&self.long_context).unwrap_or_else(|_| "".to_string());
+        if s.trim().is_empty() || s == "{}" {
+            "".to_string()
+        } else {
+            format!("Knowledge Base:\n{}", s)
+        }
+    }
 }
 
-/// Simple wrapper to highlight possible tool calls found in the assistant response.
-/// We parse them with regex. Example blocks:
-/// <search>some query</search>
-/// <bash>some bash command</bash>
-/// <scrape url>https://example.com</scrape url>
+/// A tool call enum. We parse these from the assistant's output <tags>.
 #[derive(Debug)]
 pub enum ToolCall {
     Search {
         query: String,
         count: Option<u8>,
-        safe_search: Option<bool>
+        safe_search: Option<bool>,
     },
     Bash {
         command: String,
-        args: Vec<String>
+        args: Vec<String>,
     },
     Scrape {
         url: String,
-        render_js: Option<bool>
+        render_js: Option<bool>,
     },
     GetVar {
-        name: String
+        name: String,
     },
     SetVar {
         name: String,
-        value: String
+        value: String,
     },
-    ListVars
+    ListVars,
+}
+
+/// Reflection blocks are not executed as tools; we just store them for reference.
+fn extract_reflection_blocks(text: &str) -> Vec<String> {
+    let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
+    let mut blocks = Vec::new();
+    for cap in re_reflection.captures_iter(text) {
+        if let Some(m) = cap.get(1) {
+            blocks.push(m.as_str().trim().to_string());
+        }
+    }
+    blocks
 }
 
 //
 // -----------------------------------------------------------------------------
-// 2. Minimal Tool Implementations (Search, Bash, Scrape)
-//    We’ll use simplified “defaults” for each.
+// Summaries of Repetitive Tool Output
 // -----------------------------------------------------------------------------
 
-// -- 2.1 Bash Tool
+/// This function calls the LLM in a minimal "summarizer" context, returning bullet points.
+async fn summarize_tool_output(text: &str) -> Result<String> {
+    // If it's empty or short, just skip summarizing
+    if text.trim().is_empty() {
+        return Ok("".to_string());
+    }
+
+    // Build a minimal session to ask for a summary
+    let mut summary_sess = ConversationSession::new();
+    summary_sess.messages.push(Message::System(
+        "You are a summarizer. Summarize the following tool output in bullet points, focusing on key/unique items and brevity.".to_string()
+    ));
+    summary_sess.messages.push(Message::User(text.to_string()));
+
+    let summary = call_deepseek_api(&summary_sess).await?;
+    Ok(summary.trim().to_string())
+}
+
+//
+// -----------------------------------------------------------------------------
+// Minimal Tool Implementations (Search, Bash, Scrape)
+// -----------------------------------------------------------------------------
+
+// -- Bash Tool
 async fn run_bash_command(command: &str) -> Result<String> {
     // Validate command for safety
     let forbidden_commands = ["rm", "mv", "dd", "shutdown", "reboot", "kill"];
@@ -276,41 +256,33 @@ async fn run_bash_command(command: &str) -> Result<String> {
     if !stdout.is_empty() {
         result.push_str(&format!("\n{}:\n{}\n", "STDOUT".blue().bold(), stdout));
     }
-
     if !stderr.is_empty() {
-        result.push_str(&format!("\n{}:\n{}", "STDERR".red().bold(), stderr));
+        result.push_str(&format!("\n{}:\n{}\n", "STDERR".red().bold(), stderr));
     }
 
     Ok(result)
 }
 
-// -- 2.2 Search Tool (using the Brave Search snippet you provided, but simplified)
+// -- Search Tool
 async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -> Result<String> {
-    // For demonstration, we’ll do a simple GET to Brave Search API or
-    // you can replace it with a mock or actual logic.
-    //
-    // In real usage, put your Brave API key in an environment variable: BRAVE_SEARCH_API_KEY
+    // For demonstration, do a simple call to Brave Search if an API key is set:
     let api_key = env::var("BRAVE_SEARCH_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
-        return Ok(
-            "No BRAVE_SEARCH_API_KEY found. Provide one to enable real searching.".to_string(),
-        );
+        return Ok("No BRAVE_SEARCH_API_KEY found. Provide one to enable real searching.".to_string());
     }
 
     let client = reqwest::Client::new();
     let url = "https://api.search.brave.com/res/v1/web/search";
 
-    // Basic parameters
     let count = count.unwrap_or(5);
     let safe = safe_search.unwrap_or(true);
     let safesearch = if safe { "strict" } else { "off" };
     let params = [
         ("q", query),
         ("count", &count.to_string()),
-        ("safesearch", safesearch)
+        ("safesearch", safesearch),
     ];
 
-    // Build the request
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("X-Subscription-Token", api_key.parse()?);
 
@@ -326,7 +298,6 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
         return Err(anyhow!("Brave Search error: {text}"));
     }
 
-    // Parse JSON and extract relevant info
     let json_response: Value = resp.json().await?;
     let mut result = String::new();
     result.push_str(&format!("Search Query: {}\n\n", query));
@@ -334,11 +305,13 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
     if let Some(web_results) = json_response.get("web").and_then(|w| w.get("results")) {
         if let Some(results) = web_results.as_array() {
             for (i, item) in results.iter().enumerate() {
-                if i >= 5 { break; } // Limit to top 5 results
-                
-                if let (Some(url), Some(desc)) = (item.get("url"), item.get("description")) {
-                    if let (Some(url_str), Some(desc_str)) = (url.as_str(), desc.as_str()) {
-                        result.push_str(&format!("• {}: {}\n\n", 
+                if i >= 5 {
+                    break;
+                }
+                if let (Some(url_v), Some(desc_v)) = (item.get("url"), item.get("description")) {
+                    if let (Some(url_str), Some(desc_str)) = (url_v.as_str(), desc_v.as_str()) {
+                        result.push_str(&format!(
+                            "• {}: {}\n\n",
                             url_str.blue().underline(),
                             desc_str
                         ));
@@ -351,14 +324,12 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
     Ok(result)
 }
 
-// -- 2.3 Scrape Tool (using simplified ScrapingBee logic)
+// -- Scrape Tool
 async fn run_scrape(url: &str, render_js: bool) -> Result<String> {
     // For real usage, put your ScrapingBee API key in SCRAPINGBEE_API_KEY
     let api_key = env::var("SCRAPINGBEE_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
-        return Ok(
-            "No SCRAPINGBEE_API_KEY found. Provide one to enable real scraping.".to_string(),
-        );
+        return Ok("No SCRAPINGBEE_API_KEY found. Provide one to enable real scraping.".to_string());
     }
 
     let client = reqwest::Client::new();
@@ -403,10 +374,85 @@ async fn run_scrape(url: &str, render_js: bool) -> Result<String> {
 
 //
 // -----------------------------------------------------------------------------
-// 3. LLM Call: DeepSeek Chat (OpenAI-compatible format)
+// Parsing the Assistant's Tool Calls (<search>, <bash>, <scrape>, etc.)
 // -----------------------------------------------------------------------------
 
-/// We convert our internal conversation to the JSON format that DeepSeek expects.
+fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+
+    // Example usage:
+    // <search query="stuff" count="3" safe_search="false" />
+    let re_search = Regex::new(
+        r#"(?s)<search\s+query="([^"]+)"(?:\s+count="(\d+)")?(?:\s+safe_search="(true|false)")?\s*/>"#,
+    )
+    .unwrap();
+    for cap in re_search.captures_iter(assistant_text) {
+        let query = cap[1].trim().to_string();
+        let count = cap.get(2).and_then(|m| m.as_str().parse::<u8>().ok());
+        let safe_search = cap.get(3).and_then(|m| m.as_str().parse::<bool>().ok());
+        calls.push(ToolCall::Search {
+            query,
+            count,
+            safe_search,
+        });
+    }
+
+    // Example usage:
+    // <bash command="ls" args="-l -a" />
+    let re_bash =
+        Regex::new(r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]+)")?\s*/>"#).unwrap();
+    for cap in re_bash.captures_iter(assistant_text) {
+        let command = cap[1].trim().to_string();
+        let args = cap
+            .get(2)
+            .map(|m| m.as_str().split_whitespace().map(|s| s.to_string()).collect())
+            .unwrap_or_else(|| Vec::new());
+        calls.push(ToolCall::Bash { command, args });
+    }
+
+    // Example usage:
+    // <scrape url="https://example.com" render_js="true" />
+    let re_scrape =
+        Regex::new(r#"(?s)<scrape\s+url="([^"]+)"(?:\s+render_js="(true|false)")?\s*/>"#).unwrap();
+    for cap in re_scrape.captures_iter(assistant_text) {
+        let url = cap[1].trim().to_string();
+        let render_js = cap.get(2).and_then(|m| m.as_str().parse::<bool>().ok());
+        calls.push(ToolCall::Scrape { url, render_js });
+    }
+
+    // Example usage:
+    // <get_var name="foo" />
+    let re_get_var = Regex::new(r#"(?s)<get_var\s+name="([^"]+)"\s*/>"#).unwrap();
+    for cap in re_get_var.captures_iter(assistant_text) {
+        let name = cap[1].trim().to_string();
+        calls.push(ToolCall::GetVar { name });
+    }
+
+    // Example usage:
+    // <set_var name="foo" value="bar" />
+    let re_set_var = Regex::new(r#"(?s)<set_var\s+name="([^"]+)"\s+value="([^"]+)"\s*/>"#).unwrap();
+    for cap in re_set_var.captures_iter(assistant_text) {
+        let name = cap[1].trim().to_string();
+        let value = cap[2].trim().to_string();
+        calls.push(ToolCall::SetVar { name, value });
+    }
+
+    // Example usage:
+    // <list_vars />
+    let re_list_vars = Regex::new(r"(?s)<list_vars\s*/>").unwrap();
+    if re_list_vars.is_match(assistant_text) {
+        calls.push(ToolCall::ListVars);
+    }
+
+    // Reflection blocks are extracted separately (not a ToolCall).
+    calls
+}
+
+//
+// -----------------------------------------------------------------------------
+// LLM Call (DeepSeek-compatible OpenAI-like Chat Completion)
+// -----------------------------------------------------------------------------
+
 #[derive(Debug, Serialize)]
 struct DeepSeekChatRequest {
     model: String,
@@ -468,7 +514,6 @@ async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
         return Err(anyhow!("DeepSeek API Error: {}", text));
     }
 
-    // The response body should match an OpenAI-like structure
     let json_resp: Value = resp.json().await?;
     // Usually: { "choices": [ { "message": {"role":"assistant","content":"hello"} } ], ... }
     if let Some(choices) = json_resp.get("choices") {
@@ -487,77 +532,148 @@ async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
 
 //
 // -----------------------------------------------------------------------------
-// 4. Parsing the Assistant's Tool Calls (<search>, <bash>, <scrape url>, etc.)
+// Multi-Step Tool Calls with Reflection
 // -----------------------------------------------------------------------------
 
-/// For the MVP, we use a few regexes to find all tool calls in the assistant’s text.
-/// e.g. <search>some query</search>  
-/// We do this in a naive, repeated way. Each match includes the entire snippet.
-fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
-    let mut calls = Vec::new();
-    
-    // Parse search tool calls
-    let re_search = Regex::new(r#"(?s)<search\s+query="([^"]+)"(?:\s+count="(\d+)"|\s+safe_search="(true|false)")*\s*/>"#).unwrap();
-    for cap in re_search.captures_iter(assistant_text) {
-        let query = cap[1].trim().to_string();
-        let count = cap.get(2).and_then(|m| m.as_str().parse::<u8>().ok());
-        let safe_search = cap.get(3).and_then(|m| m.as_str().parse::<bool>().ok());
-        calls.push(ToolCall::Search { query, count, safe_search });
-    }
+/// Process tool calls in a loop, automatically re-invoking the LLM until <done/> or
+/// until we hit the max iteration limit. This is especially useful for multi-step pen-testing tasks.
+pub async fn process_tool_calls(
+    session: &mut ConversationSession,
+    initial_response: String,
+) -> Result<String> {
+    let mut current_response = initial_response;
+    let mut iteration = 0;
 
-    // Parse bash tool calls
-    let re_bash = Regex::new(r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]+)")*\s*/>"#).unwrap();
-    for cap in re_bash.captures_iter(assistant_text) {
-        let command = cap[1].trim().to_string();
-        let args = cap.get(2)
-            .map(|m| m.as_str().split_whitespace().map(|s| s.to_string()).collect())
-            .unwrap_or_else(Vec::new);
-        calls.push(ToolCall::Bash { command, args });
-    }
+    loop {
+        iteration += 1;
+        if iteration > MAX_ITERATIONS {
+            return Ok(format!(
+                "{}: Reached maximum number of iterations ({})",
+                "STOPPED".red().bold(),
+                MAX_ITERATIONS
+            ));
+        }
 
-    // Parse scrape tool calls
-    let re_scrape = Regex::new(r#"(?s)<scrape\s+url="([^"]+)"(?:\s+render_js="(true|false)")*\s*/>"#).unwrap();
-    for cap in re_scrape.captures_iter(assistant_text) {
-        let url = cap[1].trim().to_string();
-        let render_js = cap.get(2).and_then(|m| m.as_str().parse::<bool>().ok());
-        calls.push(ToolCall::Scrape { url, render_js });
-    }
+        // Check for completion condition
+        if current_response.contains("<done/>") {
+            return Ok(current_response.replace("<done/>", "").trim().to_string());
+        }
 
-    // Parse get var tool calls
-    let re_get_var = Regex::new(r#"(?s)<get_var\s+name="([^"]+)"\s*/>"#).unwrap();
-    for cap in re_get_var.captures_iter(assistant_text) {
-        let name = cap[1].trim().to_string();
-        calls.push(ToolCall::GetVar { name });
-    }
+        // Parse reflection blocks. We'll store them in the conversation (as "assistant" messages).
+        let reflection_blocks = extract_reflection_blocks(&current_response);
+        for block in reflection_blocks {
+            session
+                .messages
+                .push(Message::Assistant(format!("(reflection)\n{}", block)));
+        }
 
-    // Parse set var tool calls
-    let re_set_var = Regex::new(r#"(?s)<set_var\s+name="([^"]+)"\s+value="([^"]+)"\s*/>"#).unwrap();
-    for cap in re_set_var.captures_iter(assistant_text) {
-        let name = cap[1].trim().to_string();
-        let value = cap[2].trim().to_string();
-        calls.push(ToolCall::SetVar { name, value });
-    }
+        // Parse and execute tool calls
+        let tool_calls = parse_tool_calls(&current_response);
+        if tool_calls.is_empty() {
+            // No further tool calls to make. We'll consider this the final answer for now.
+            return Ok(current_response.trim().to_string());
+        }
 
-    // Parse list vars tool calls
-    let re_list_vars = Regex::new(r"(?s)<list_vars\s*/>").unwrap();
-    if re_list_vars.is_match(assistant_text) {
-        calls.push(ToolCall::ListVars);
-    }
+        let mut tool_results_text = String::new();
+        for call in tool_calls {
+            match call {
+                ToolCall::Search {
+                    query,
+                    count,
+                    safe_search,
+                } => {
+                    let result = match run_search(&query, count, safe_search).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during search: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
+                        query, result
+                    ));
+                }
+                ToolCall::Bash { command, args } => {
+                    let full_cmd = format!("{} {}", command, args.join(" "));
+                    let result = match run_bash_command(&full_cmd).await {
+                        Ok(r) => r,
+                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "{}\n{}\n",
+                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                        result
+                    ));
+                }
+                ToolCall::Scrape { url, render_js } => {
+                    let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during scrape: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
+                        url, result
+                    ));
+                }
+                ToolCall::GetVar { name } => {
+                    let result = match session.get_var(&name) {
+                        Some(value) => format!("Variable '{}': {}", name, value),
+                        None => format!("Variable '{}' not found", name),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [GET VAR result] ====\n{}\n\n",
+                        result
+                    ));
+                }
+                ToolCall::SetVar { name, value } => {
+                    session.set_var(name.clone(), value.clone());
+                    tool_results_text.push_str(&format!(
+                        "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
+                        name, value
+                    ));
+                }
+                ToolCall::ListVars => {
+                    let result = session.list_vars();
+                    tool_results_text.push_str(&format!(
+                        "==== [LIST VARS result] ====\n{}\n\n",
+                        result
+                    ));
+                }
+            }
+        }
 
-    // Parse reflection blocks
-    let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
-    if re_reflection.is_match(assistant_text) {
-        // We don't need to create a ToolCall for reflections since they're handled automatically
-    }
+        // Summarize the tool results if they're large
+        if tool_results_text.len() > 500 {
+            if let Ok(summary) = summarize_tool_output(&tool_results_text).await {
+                if !summary.is_empty() {
+                    // Add to conversation
+                    session.messages.push(Message::Assistant(format!(
+                        "Summary of tool results:\n{}",
+                        summary
+                    )));
+                    // Also store in long_context
+                    session.append_to_long_context(
+                        "tool_summaries",
+                        &json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "summary": summary
+                        }),
+                    );
+                }
+            }
+        }
 
-    calls
+        // Add tool results as an assistant message so the LLM can see it
+        let tool_msg = format!("Tool results:\n{}", tool_results_text);
+        session.messages.push(Message::Assistant(tool_msg.clone()));
+
+        // Now re-invoke the LLM with the updated conversation
+        let next_response = timeout(Duration::from_secs(30), call_deepseek_api(session)).await??;
+        current_response = next_response;
+    }
 }
-
-
 
 //
 // -----------------------------------------------------------------------------
-// 5. Session Persistence
+// Session Persistence
 // -----------------------------------------------------------------------------
 
 /// Save the conversation to `session.json`.
@@ -576,13 +692,10 @@ fn load_session() -> ConversationSession {
 
 fn load_session_from_path(path: &PathBuf) -> ConversationSession {
     if path.exists() {
-        match File::open(path) {
-            Ok(file) => {
-                if let Ok(sess) = serde_json::from_reader(file) {
-                    return sess;
-                }
+        if let Ok(file) = File::open(path) {
+            if let Ok(sess) = serde_json::from_reader(file) {
+                return sess;
             }
-            Err(_) => {}
         }
     }
     ConversationSession::new()
@@ -590,25 +703,22 @@ fn load_session_from_path(path: &PathBuf) -> ConversationSession {
 
 //
 // -----------------------------------------------------------------------------
-// 6. Test Mode - Run a session file and show results
+// Test Mode - Run a session file and show results
 // -----------------------------------------------------------------------------
 
 /// Run a session file in test mode - process all messages and show results
+/// (one-shot, not interactive).
 async fn run_test_session(session_path: &str) -> Result<()> {
     let path = PathBuf::from(session_path);
     let session = load_session_from_path(&path);
-    
-    // Clone messages to avoid borrowing issues
+
     let messages = session.messages.clone();
-    
-    // Process each user message in sequence
+
     for msg in messages {
         if let Message::User(user_input) = msg {
-            // Create a new mutable session for each iteration
             let mut session = load_session_from_path(&path);
             println!("{} {}", "[User]".green().bold(), user_input);
-            
-            // Call the LLM
+
             let result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
             let assistant_response = match result {
                 Ok(Ok(content)) => content,
@@ -622,12 +732,25 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             };
 
-            // Parse and run tool calls
+            // Parse reflection blocks
+            let reflection_blocks = extract_reflection_blocks(&assistant_response);
+            for block in reflection_blocks {
+                session.messages.push(Message::Assistant(format!(
+                    "(reflection)\n{}",
+                    block
+                )));
+            }
+
+            // Parse tool calls
             let tool_calls = parse_tool_calls(&assistant_response);
             let mut tool_results_text = String::new();
             for call in tool_calls {
                 match call {
-                    ToolCall::Search { query, count, safe_search } => {
+                    ToolCall::Search {
+                        query,
+                        count,
+                        safe_search,
+                    } => {
                         let result = match run_search(&query, count, safe_search).await {
                             Ok(r) => r,
                             Err(e) => format!("ERROR during search: {}", e),
@@ -686,16 +809,31 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             }
 
-            // Show assistant response and tool results
-            let display_text = &assistant_response.trim().to_string();
-            if !display_text.is_empty() {
-                println!(
-                    "{} {}",
-                    "[Assistant]".blue().bold(),
-                    display_text
-                );
+            // Summarize if needed
+            if tool_results_text.len() > 500 {
+                if let Ok(summary) = summarize_tool_output(&tool_results_text).await {
+                    if !summary.is_empty() {
+                        session.messages.push(Message::Assistant(format!(
+                            "Summary of tool results:\n{}",
+                            summary
+                        )));
+                        session.append_to_long_context(
+                            "tool_summaries",
+                            &json!({
+                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                "summary": summary
+                            }),
+                        );
+                    }
+                }
             }
-            
+
+            // Show assistant response
+            let display_text = assistant_response.trim();
+            if !display_text.is_empty() {
+                println!("{} {}", "[Assistant]".blue().bold(), display_text);
+            }
+
             if !tool_results_text.is_empty() {
                 println!(
                     "{} {}",
@@ -705,13 +843,13 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
 
 //
 // -----------------------------------------------------------------------------
-// 7. Main CLI Loop
+// Main CLI Loop
 // -----------------------------------------------------------------------------
 
 /// CLI arguments
@@ -732,57 +870,117 @@ async fn main() -> Result<()> {
         return run_test_session(&session_path).await;
     }
 
+    let preamble = r#"You are an EXPERT AI ASSISTANT. Your primary function is to assist users by answering their questions and performing tasks using a suite of TOOLS.  You are designed to handle complex, multi-step tasks, and you are equipped with tools to search the web, run bash commands, scrape web pages, and manage variables.
 
-    let preamble = r#"You are an EXPERT AI ASSISTANT whose PRIMARY FUNCTION is to use tools to answer user questions.  You are **required** to use tools whenever they can provide a more accurate, up-to-date, or comprehensive answer than your internal knowledge.
+**Your capabilities include:**
 
-You have access to the following **essential tools**:
+* **Information Retrieval:** You can access and process real-time information from the internet using the `<search>` and `<scrape>` tools.
+* **System Interaction:** You can interact with the underlying operating system by executing commands via the `<bash>` tool.
+* **Memory Management:** You have access to both short-term variables and a long-term knowledge base to store and retrieve information across interactions.
+* **Reflection and Planning:** You can use `<reflection>` blocks to think through complex problems, plan your next steps, and break down tasks into manageable parts. The system will automatically proceed after you use a `<reflection>` block.
+* **Multi-Step Task Execution:** You are designed to perform tasks that require multiple steps, including tool calls, analysis of results, and iterative refinement of your approach.
 
-* `<search query="query" [count="5"] [safe_search="true"] />`: **YOU MUST USE THIS TOOL WHENEVER THE USER ASKS A QUESTION THAT REQUIRES INFORMATION FROM THE INTERNET, CURRENT EVENTS, FACTS, OR SPECIFIC WEB CONTENT.** Example: `<search query="current weather in Paris" count="3" safe_search="true" />`
+**Tool Usage is MANDATORY:**
 
-* `<bash command="command" [args="arg1 arg2"] />`: Use this tool to execute safe bash commands for system-related tasks. Example: `<bash command="ls" args="-l -a" />`
+To effectively assist users, you **MUST** utilize the available tools.  Consider every user request and determine if a tool is necessary to fulfill it.  Do not attempt to answer questions or perform tasks without using tools when appropriate.
 
-* `<scrape url="URL" [render_js="true"] />`: Use this tool to get the text content of webpages. Example: `<scrape url="https://example.com" render_js="true" />`
+**Available Tools and How to Call Them:**
 
-* **Reflection:**
-  - After tool execution, the system will automatically analyze results and suggest next steps
-  - Example: `<reflection>Summary: Found 3 results. Quality: Good. Next: Analyze results. Conclusion: Ready for next step.</reflection>`
+You call tools by using specific XML-like tags in your response. The system will parse these tags, execute the corresponding tools, and provide you with the results.
 
-* **Variable Tools:**
-  - `<set_var name="name" value="value" />`: Store important information for later use. Example: `<set_var name="target_ip" value="192.168.1.100" />`
-  - `<get_var name="name" />`: Retrieve a stored variable. Example: `<get_var name="target_ip" />`
-  - `<list_vars />`: List all stored variables and their values
+Here are the available tools and their usage:
 
-**YOUR OPERATING PROCEDURE IS AS FOLLOWS:**
+1. **`<search>` Tool:**  Used for searching the web.
 
-1. **Analyze User Request:** Understand what the user is asking.
-2. **IMMEDIATELY CONSIDER TOOL USE:**  **For almost every question, your first thought MUST be: "Can a tool help me answer this better?"**
-3. **PRIORITIZE SEARCH:** **If the question relates to facts, current events, or anything that might be on the internet, YOU MUST USE the `<search>` tool FIRST.**  Do not rely on your internal knowledge for these types of questions.
-4. **Use `<bash>` or `<scrape>` if relevant:**  If the user's request implies a system command or scraping a webpage, use those tools accordingly.
-5. **If NO tool is genuinely needed (very rare for information-seeking questions), then and ONLY then answer directly.**
-6. **Respond clearly:** Tell the user what you are doing and if you used a tool. Example: "I am using the `<search>` tool to find..." or "Based on my search results..."
+   * **Call Format:** `<search query="..." count="..." safe_search="..." />`
+   * **Parameters:**
+      * `query` (required): The search query string.  Be specific and descriptive in your queries.
+      * `count` (optional, default: 5): The number of search results to return (1-10).
+      * `safe_search` (optional, default: true):  Boolean value (`true` or `false`) to enable or disable safe search filtering.
+   * **Example Calls:**
+      * `<search query="current weather in London" />`
+      * `<search query="latest cybersecurity threats" count="3" safe_search="false" />`
+   * **Tool Response:** The tool will return a formatted text block containing a list of search results, including URLs and descriptions.
 
-**YOU ARE DESIGNED TO BE A TOOL-USING AI.  YOUR VALUE COMES FROM YOUR ABILITY TO USE TOOLS EFFECTIVELY.  DO NOT HESITATE TO USE TOOLS. USE THEM PROACTIVELY AND FREQUENTLY.**
+2. **`<bash>` Tool:** Used to execute commands in a bash shell. **Use this tool with caution and only when necessary for system-level tasks.**
 
-Note that you can use multiple tools in one response: 
+   * **Call Format:** `<bash command="..." args="..." />`
+   * **Parameters:**
+      * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). **Avoid potentially harmful commands like `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.**
+      * `args` (optional): Space-separated arguments for the command.
+   * **Example Calls:**
+      * `<bash command="ping" args="google.com -c 3" />`
+      * `<bash command="ls" args="-l /tmp" />`
+   * **Tool Response:** The tool will return the STDOUT and STDERR output of the command, along with the exit code.
 
-<search> what's the weather in orange county, TX </search> <search> Is the orange county texas basketball game still on for tonight </search>  <search> What's the best taco to eat during a basketball game? </search> 
+3. **`<scrape>` Tool:** Used to fetch the content of a web page.
 
-**Example of REQUIRED tool use:**
+   * **Call Format:** `<scrape url="..." render_js="..." />`
+   * **Parameters:**
+      * `url` (required): The URL of the web page to scrape. Ensure the URL is valid and properly formatted.
+      * `render_js` (optional, default: true): Boolean value (`true` or `false`) indicating whether to render JavaScript on the page before scraping. Set to `true` for dynamic websites, `false` for static HTML.
+   * **Example Calls:**
+      * `<scrape url="https://www.example.com" />`
+      * `<scrape url="https://news-website.com/article" render_js="false" />`
+   * **Tool Response:** The tool will return the text content extracted from the HTML of the web page. For binary content, it will indicate the number of bytes received.
 
-User: "What is the weather in Paris right now?"
-Assistant: `<search>current weather in Paris</search>`  **<-- CORRECT - TOOL USED**
-Assistant: "The weather in Paris is sunny." **<-- INCORRECT - ANSWERING WITHOUT TOOL WHEN TOOL IS NEEDED**
+4. **`<get_var>` Tool:** Used to retrieve the value of a previously set variable.
 
-User: "List files in my home directory."
-Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
+   * **Call Format:** `<get_var name="..." />`
+   * **Parameters:**
+      * `name` (required): The name of the variable to retrieve.
+   * **Example Call:** `<get_var name="current_city" />`
+   * **Tool Response:** The tool will return the value of the variable if it exists, or indicate if the variable is not found.
 
-User: "The target IP is 192.168.1.100"
-Assistant: `<set var>target_ip=192.168.1.100</set var>` **<-- CORRECT - STORING IMPORTANT INFO**
+5. **`<set_var>` Tool:** Used to store a value in a variable for later retrieval.  Variables are useful for short-term memory within a conversation.
 
-User: "What IP are we targeting?"
-Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO**
+   * **Call Format:** `<set_var name="..." value="..." />`
+   * **Parameters:**
+      * `name` (required): The name of the variable to set (e.g., `current_city`, `search_results_summary`). Choose descriptive names.
+      * `value` (required): The value to store in the variable.
+   * **Example Call:** `<set_var name="current_city" value="London" />`
+   * **Tool Response:** The tool will confirm that the variable has been set.
 
-**FAILURE TO USE TOOLS WHEN APPROPRIATE IS A CRITICAL ERROR.**  Ensure you are always checking if a tool can improve your answer before responding from internal knowledge. Use variables to store and retrieve important information across multiple turns of conversation."#;
+6. **`<list_vars>` Tool:** Used to list all currently set variables and their values.
+
+   * **Call Format:** `<list_vars />`
+   * **Parameters:** None
+   * **Example Call:** `<list_vars />`
+   * **Tool Response:** The tool will return a list of all variables, their values, and the timestamp when they were set.
+
+**Reflection Blocks:**
+
+Use `<reflection>` blocks to document your thought process, plan your next steps, or outline a strategy.  This is useful for complex tasks where you need to think step-by-step.
+
+* **Call Format:** `<reflection>Your reflection text here. Describe your thinking, planning, or analysis.</reflection>`
+* **Example:** `<reflection>I need to find the capital of France. First, I will use the <search> tool to search for "capital of France". Then, I will extract the answer from the search results.</reflection>`
+* **System Behavior:** The system will record your reflection but will not treat it as a tool call. It's for your internal reasoning and planning.
+
+**Long-Term Knowledge Base (long_context):**
+
+The `long_context` is a structured knowledge base where you can store summarized information and findings.  Tools and you can append data to it.  This knowledge is persisted across interactions and can be used to maintain context over longer conversations.  You can summarize and store important information in the `long_context` to build upon previously discovered knowledge.
+
+**Signaling Task Completion:**
+
+When you have finished answering the user's question or completing the requested task, and you do not need to perform any further tool calls, conclude your response with the tag `<done/>`.  This signals to the system that you have completed your chain of thought.
+
+**Example Conversation Flow:**
+
+**User:** What is the weather in Paris?
+
+**Assistant:** `<reflection>The user is asking for the weather in Paris. I need to use the <search> tool to get this information.</reflection><search query="current weather in Paris" /><reflection>Now I have the search results. I will extract the current weather information and present it to the user, then I will signal that I am done.</reflection>The current weather in Paris is ... <done/>`
+
+**Remember to:**
+
+* **Always consider tool usage first.**
+* **Use precise and descriptive queries for `<search>` and valid URLs for `<scrape>`.**
+* **Be mindful of security when using `<bash>`.**
+* **Utilize variables (`<set_var>`, `<get_var>`, `<list_vars>`) to manage short-term information.**
+* **Use `<reflection>` for planning and complex tasks.**
+* **Store summarized knowledge in the `long_context`.**
+* **End your final response with `<done/>` when finished.**
+
+By following these guidelines and effectively using the provided tools, you can be a highly effective and helpful AI assistant."#;
 
     // Initialize logging with log level from RUST_LOG or LOG_LEVEL environment
     let filter = EnvFilter::from_default_env();
@@ -802,10 +1000,8 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
     // Load or initialize the conversation
     let mut session = load_session();
     if session.messages.is_empty() {
-        // You can provide an initial system role instruction if you want
-        session.messages.push(Message::System(
-            preamble.to_string()
-        ));
+        // Provide an initial system role instruction if none is present
+        session.messages.push(Message::System(preamble.to_string()));
     }
 
     // REPL loop
@@ -818,21 +1014,32 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
             break;
         }
 
-        // 1) Add recent variables context to user message
+        // Include the summarized long_context and recent vars in the user's message for AI reference
         let recent_vars = session.recent_vars();
-        let full_user_message = if !recent_vars.is_empty() {
-            format!("Recent variables for reference:\n{}\n\nUser message: {}", 
-                recent_vars, user_input)
-        } else {
+        let knowledge_summary = session.summarize_long_context();
+        let mut context_lines = vec![];
+
+        if !recent_vars.is_empty() {
+            context_lines.push(format!("Recent variables:\n{}", recent_vars));
+        }
+        if !knowledge_summary.is_empty() {
+            context_lines.push(knowledge_summary);
+        }
+        if !context_lines.is_empty() {
+            context_lines.push(format!("\nUser message: {}", user_input));
+        }
+        let full_user_message = if context_lines.is_empty() {
+            // No extra context
             user_input.clone()
+        } else {
+            context_lines.join("\n\n")
         };
 
-        // 2) Add the user’s message to the conversation and show it
+        // 1) Add the user’s message to the conversation and show it
         println!("{} {}", "[User]".green().bold(), user_input);
         session.messages.push(Message::User(full_user_message));
 
-        // 2) Call the LLM
-        // (with a simple timeout to avoid indefinite hang - 30s for demo)
+        // 2) Call the LLM with a simple timeout
         let result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
 
         let assistant_response = match result {
@@ -853,15 +1060,25 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
             }
         };
 
-        // 3) Parse out any tool calls
-        let tool_calls = parse_tool_calls(&assistant_response);
+        // 3) Parse any reflection blocks
+        let reflection_blocks = extract_reflection_blocks(&assistant_response);
+        for block in reflection_blocks {
+            session.messages.push(Message::Assistant(format!(
+                "(reflection)\n{}",
+                block
+            )));
+        }
 
-        // 4) If there are tool calls, we run them all in sequence, gather results,
-        //    then append them to the conversation so the LLM can “see” those results.
+        // 4) Parse tool calls
+        let tool_calls = parse_tool_calls(&assistant_response);
         let mut tool_results_text = String::new();
         for call in tool_calls {
             match call {
-                ToolCall::Search { query, count, safe_search } => {
+                ToolCall::Search {
+                    query,
+                    count,
+                    safe_search,
+                } => {
                     let result = match run_search(&query, count, safe_search).await {
                         Ok(r) => r,
                         Err(e) => format!("ERROR during search: {}", e),
@@ -878,7 +1095,7 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
                         Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
                     };
                     tool_results_text.push_str(&format!(
-                        "\n{}\n{}\n",
+                        "{}\n{}\n",
                         "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
                         result
                     ));
@@ -920,19 +1137,36 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
             }
         }
 
-        // Add final response to conversation
-        session.messages.push(Message::Assistant(final_response.clone()));
-
-        // Show the final response
-        if !final_response.is_empty() {
-            println!(
-                "{} {}",
-                "[Assistant]".blue().bold(),
-                final_response
-            );
+        // 5) Summarize large tool output automatically
+        if tool_results_text.len() > 500 {
+            if let Ok(summary) = summarize_tool_output(&tool_results_text).await {
+                if !summary.is_empty() {
+                    session.messages.push(Message::Assistant(format!(
+                        "Summary of tool results:\n{}",
+                        summary
+                    )));
+                    session.append_to_long_context(
+                        "tool_summaries",
+                        &json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "summary": summary
+                        }),
+                    );
+                }
+            }
         }
 
-        // 6) Save the updated session
+        // 6) Add the assistant's raw response to the conversation
+        //    (so the user can see the "final" LLM text after any tool calls).
+        let final_response = assistant_response.clone();
+        session.messages.push(Message::Assistant(final_response.clone()));
+
+        // Display final response
+        if !final_response.is_empty() {
+            println!("{} {}", "[Assistant]".blue().bold(), final_response);
+        }
+
+        // Save session
         if let Err(e) = save_session(&session) {
             eprintln!("Failed to save session: {}", e);
         }
@@ -940,4 +1174,3 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
 
     Ok(())
 }
-
