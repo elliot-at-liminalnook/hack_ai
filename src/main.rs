@@ -131,7 +131,7 @@ async fn run_search(query: &str) -> Result<String> {
     let url = "https://api.search.brave.com/res/v1/web/search";
 
     // Basic parameters
-    let params = [("q", query), ("count", "20"), ("safesearch", "moderate")];
+    let params = [("q", query), ("count", "5"), ("safesearch", "moderate")];
 
     // Build the request
     let mut headers = reqwest::header::HeaderMap::new();
