@@ -1338,30 +1338,23 @@ By following these guidelines and effectively using the provided tools, you can 
             }
         }
 
-        // Include the summarized long_context and recent vars in the user's message for AI reference
+        // 1) Add the user's message to the conversation and show it
+        println!("{} {}", "[User]".green().bold(), user_input);
+        session.messages.push(Message::User(user_input.clone()));
+
+        // Add context as assistant messages
         let recent_vars = session.recent_vars();
         let knowledge_summary = session.summarize_long_context();
-        let mut context_lines = vec![];
 
         if !recent_vars.is_empty() {
-            context_lines.push(format!("Recent variables:\n{}", recent_vars));
+            session.messages.push(Message::Assistant(format!(
+                "Recent variables:\n{}",
+                recent_vars
+            )));
         }
         if !knowledge_summary.is_empty() {
-            context_lines.push(knowledge_summary);
+            session.messages.push(Message::Assistant(knowledge_summary));
         }
-        if !context_lines.is_empty() {
-            context_lines.push(format!("\nUser message: {}", user_input));
-        }
-        let full_user_message = if context_lines.is_empty() {
-            // No extra context
-            user_input.clone()
-        } else {
-            context_lines.join("\n\n")
-        };
-
-        // 1) Add the user’s message to the conversation and show it
-        println!("{} {}", "[User]".green().bold(), user_input);
-        session.messages.push(Message::User(full_user_message));
 
         // 2) Call the LLM with a simple timeout, always using "deepseek-chat" for normal conversation
         let result = timeout(Duration::from_secs(30), call_deepseek_api(&mut session, "deepseek-chat")).await;
