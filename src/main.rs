@@ -551,6 +551,11 @@ You have access to the following **essential tools**:
 
 * `<scrape url>URL</scrape url>`: Use this tool to get the text content of webpages. **USE THIS TOOL IF A SEARCH RESULT POINTS TO A RELEVANT WEBPAGE OR IF THE USER ASKS FOR INFORMATION LIKELY CONTAINED ON A SPECIFIC WEBSITE.**
 
+* **Variable Tools:**
+  - `<set var>name=value</set var>`: Store important information for later use. Example: `<set var>target_ip=192.168.1.100</set var>`
+  - `<get var>name</get var>`: Retrieve a stored variable. Example: `<get var>target_ip</get var>`
+  - `<list vars/>`: List all stored variables and their values
+
 **YOUR OPERATING PROCEDURE IS AS FOLLOWS:**
 
 1. **Analyze User Request:** Understand what the user is asking.
@@ -575,7 +580,13 @@ Assistant: "The weather in Paris is sunny." **<-- INCORRECT - ANSWERING WITHOUT 
 User: "List files in my home directory."
 Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
 
-**FAILURE TO USE TOOLS WHEN APPROPRIATE IS A CRITICAL ERROR.**  Ensure you are always checking if a tool can improve your answer before responding from internal knowledge."#;
+User: "The target IP is 192.168.1.100"
+Assistant: `<set var>target_ip=192.168.1.100</set var>` **<-- CORRECT - STORING IMPORTANT INFO**
+
+User: "What IP are we targeting?"
+Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO**
+
+**FAILURE TO USE TOOLS WHEN APPROPRIATE IS A CRITICAL ERROR.**  Ensure you are always checking if a tool can improve your answer before responding from internal knowledge. Use variables to store and retrieve important information across multiple turns of conversation."#;
 
     // Initialize logging with log level from RUST_LOG or LOG_LEVEL environment
     let filter = EnvFilter::from_default_env();
