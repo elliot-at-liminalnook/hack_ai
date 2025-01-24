@@ -445,6 +445,12 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
         calls.push(ToolCall::ListVars);
     }
 
+    // Parse reflection blocks
+    let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
+    if re_reflection.is_match(assistant_text) {
+        // We don't need to create a ToolCall for reflections since they're handled automatically
+    }
+
     calls
 }
 
@@ -638,6 +644,10 @@ You have access to the following **essential tools**:
 
 * `<scrape url="URL" [render_js="true"] />`: Use this tool to get the text content of webpages. Example: `<scrape url="https://example.com" render_js="true" />`
 
+* **Reflection:**
+  - After tool execution, the system will automatically analyze results and suggest next steps
+  - Example: `<reflection>Summary: Found 3 results. Quality: Good. Next: Analyze results. Conclusion: Ready for next step.</reflection>`
+
 * **Variable Tools:**
   - `<set_var name="name" value="value" />`: Store important information for later use. Example: `<set_var name="target_ip" value="192.168.1.100" />`
   - `<get_var name="name" />`: Retrieve a stored variable. Example: `<get_var name="target_ip" />`
@@ -815,14 +825,39 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
         // so the conversation chain includes the results. The LLM can then reference them.
         if !tool_results_text.is_empty() {
             let tool_msg = format!("Tool results:\n{}", tool_results_text);
-            session.messages.push(Message::Assistant(tool_msg));
+            session.messages.push(Message::Assistant(tool_msg.clone()));
 
-            // Optionally, call the LLM again so it can comment on the tool results.
-            // But for an MVP, we might let the user read the tool results first,
-            // then the user asks for next steps.
-            //
-            // In this example, we do NOT automatically call the LLM again
-            // because we’re “turn-based.” But you could if desired.
+            // Add reflection step
+            let reflection_prompt = format!(
+                "Review the tool results and determine if additional steps are needed:\n\n{}\n\n\
+                Provide your analysis in a <reflection> block with:\n\
+                - Summary of findings\n\
+                - Assessment of result quality\n\
+                - Next steps if needed\n\
+                - Any errors to fix\n\
+                - Final conclusion\n\
+                </reflection>",
+                tool_msg
+            );
+
+            // Call LLM for reflection
+            let reflection_result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
+            if let Ok(Ok(reflection)) = reflection_result {
+                // Parse and display reflection
+                let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
+                if let Some(cap) = re_reflection.captures(&reflection) {
+                    let reflection_text = cap[1].trim();
+                    println!(
+                        "{} {}\n",
+                        "[Reflection]".magenta().bold(),
+                        reflection_text
+                    );
+                    session.messages.push(Message::Assistant(format!(
+                        "Reflection on tool results:\n{}",
+                        reflection_text
+                    )));
+                }
+            }
         }
 
         // 5) Show the assistant’s textual response to the user (minus the <tool> blocks)
