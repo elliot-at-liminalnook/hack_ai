@@ -51,6 +51,7 @@ pub enum Message {
 pub struct ConversationSession {
     pub messages: Vec<Message>,
     pub variables: std::collections::HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
+    pub audit_log: Vec<String>,
 }
 
 impl ConversationSession {
@@ -58,7 +59,19 @@ impl ConversationSession {
         Self { 
             messages: vec![],
             variables: std::collections::HashMap::new(),
+            audit_log: vec![],
         }
+    }
+
+    /// Add an entry to the audit log
+    pub fn log_audit_entry(&mut self, entry: String) {
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        self.audit_log.push(format!("[{}] {}", timestamp, entry));
+    }
+
+    /// Get the full audit log as a string
+    pub fn get_audit_log(&self) -> String {
+        self.audit_log.join("\n")
     }
 
     /// Get a variable value by key
@@ -118,6 +131,7 @@ impl ConversationSession {
 /// <scrape url>https://example.com</scrape url>
 #[derive(Debug)]
 pub enum ToolCall {
+    ExportAuditLog,
     Search {
         query: String,
         count: Option<u8>,
@@ -445,6 +459,12 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
         calls.push(ToolCall::ListVars);
     }
 
+    // Parse export audit log calls
+    let re_export_audit = Regex::new(r"(?s)<export_audit\s*/>").unwrap();
+    if re_export_audit.is_match(assistant_text) {
+        calls.push(ToolCall::ExportAuditLog);
+    }
+
     calls
 }
 
@@ -524,8 +544,20 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 match call {
                     ToolCall::Search { query, count, safe_search } => {
                         let result = match run_search(&query, count, safe_search).await {
-                            Ok(r) => r,
-                            Err(e) => format!("ERROR during search: {}", e),
+                            Ok(r) => {
+                                session.log_audit_entry(format!(
+                                    "Executed search: query='{}' count={:?} safe_search={:?}",
+                                    query, count, safe_search
+                                ));
+                                r
+                            },
+                            Err(e) => {
+                                session.log_audit_entry(format!(
+                                    "Search failed: query='{}' error='{}'",
+                                    query, e
+                                ));
+                                format!("ERROR during search: {}", e)
+                            },
                         };
                         tool_results_text.push_str(&format!(
                             "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
@@ -535,8 +567,20 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                     ToolCall::Bash { command, args } => {
                         let full_cmd = format!("{} {}", command, args.join(" "));
                         let result = match run_bash_command(&full_cmd).await {
-                            Ok(r) => r,
-                            Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                            Ok(r) => {
+                                session.log_audit_entry(format!(
+                                    "Executed bash command: '{}'",
+                                    full_cmd
+                                ));
+                                r
+                            },
+                            Err(e) => {
+                                session.log_audit_entry(format!(
+                                    "Bash command failed: '{}' error='{}'",
+                                    full_cmd, e
+                                ));
+                                format!("{}: {}", "BASH ERROR".red().bold(), e)
+                            },
                         };
                         tool_results_text.push_str(&format!(
                             "\n{}\n{}\n",
@@ -566,6 +610,10 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                     }
                     ToolCall::SetVar { name, value } => {
                         session.set_var(name.clone(), value.clone());
+                        session.log_audit_entry(format!(
+                            "Set variable: '{}' = '{}'",
+                            name, value
+                        ));
                         tool_results_text.push_str(&format!(
                             "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
                             name, value
@@ -577,6 +625,22 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             "==== [LIST VARS result] ====\n{}\n\n",
                             result
                         ));
+                    }
+                    ToolCall::ExportAuditLog => {
+                        let log = session.get_audit_log();
+                        let filename = format!("audit_log_{}.txt", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+                        if let Err(e) = std::fs::write(&filename, &log) {
+                            tool_results_text.push_str(&format!(
+                                "==== [EXPORT AUDIT ERROR] ====\nFailed to write audit log: {}\n\n",
+                                e
+                            ));
+                        } else {
+                            tool_results_text.push_str(&format!(
+                                "==== [EXPORT AUDIT SUCCESS] ====\nAudit log exported to {}\n\n",
+                                filename
+                            ));
+                            session.log_audit_entry(format!("Exported audit log to {}", filename));
+                        }
                     }
                 }
             }
@@ -637,6 +701,9 @@ You have access to the following **essential tools**:
 * `<bash command="command" [args="arg1 arg2"] />`: Use this tool to execute safe bash commands for system-related tasks. Example: `<bash command="ls" args="-l -a" />`
 
 * `<scrape url="URL" [render_js="true"] />`: Use this tool to get the text content of webpages. Example: `<scrape url="https://example.com" render_js="true" />`
+
+* **Audit Tools:**
+  - `<export_audit />`: Export the audit log to a file
 
 * **Variable Tools:**
   - `<set_var name="name" value="value" />`: Store important information for later use. Example: `<set_var name="target_ip" value="192.168.1.100" />`
