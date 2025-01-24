@@ -448,13 +448,7 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
     calls
 }
 
-/// Remove the tool blocks from the assistant’s textual response
-/// so the final “display text” for the user is cleaned up.
-fn remove_tool_blocks(assistant_text: &str) -> String {
-    let re_tool_blocks =
-        Regex::new(r"(?s)<(search|bash|scrape url)>(.*?)</(search|bash|scrape url)>").unwrap();
-    re_tool_blocks.replace_all(assistant_text, "").to_string()
-}
+
 
 //
 // -----------------------------------------------------------------------------
