@@ -56,6 +56,10 @@ pub enum Message {
 /// when running multi-step tasks (like chain-of-thought).
 const MAX_ITERATIONS: usize = 10;
 
+/// Maximum approximate character count before we trigger conversation summarization.
+/// (64k tokens ~ ~240k characters, so we'll use 200k as a rough threshold just to be safe).
+const CONVERSATION_CHAR_LIMIT: usize = 200_000;
+
 /// The entire conversation session, which we store in JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSession {
@@ -186,7 +190,11 @@ pub enum ToolCall {
     ListVars,
 }
 
-/// Reflection blocks are not executed as tools; we just store them for reference.
+//
+// -----------------------------------------------------------------------------
+// Reflection Blocks
+// -----------------------------------------------------------------------------
+
 fn extract_reflection_blocks(text: &str) -> Vec<String> {
     let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
     let mut blocks = Vec::new();
@@ -217,7 +225,8 @@ async fn summarize_tool_output(text: &str) -> Result<String> {
     ));
     summary_sess.messages.push(Message::User(text.to_string()));
 
-    let summary = call_deepseek_api(&summary_sess).await?;
+    // We reuse the normal deepseek-chat for summarizing tool outputs
+    let summary = call_deepseek_api(&summary_sess, "deepseek-chat").await?;
     Ok(summary.trim().to_string())
 }
 
@@ -450,7 +459,7 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
 
 //
 // -----------------------------------------------------------------------------
-// LLM Call (DeepSeek-compatible OpenAI-like Chat Completion)
+// LLM Calls
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
@@ -467,15 +476,56 @@ struct DeepSeekMessage {
     content: String,
 }
 
-/// Perform a single chat completion call to DeepSeek with the entire conversation.
-async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
-    let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        error!("Missing DEEPSEEK_API_KEY environment variable!");
-        return Err(anyhow!("DEEPSEEK_API_KEY not set"));
+/// Use "deepseek-chat" or "deepseek-reasoner" model as requested
+/// (based on the `model_name` parameter).
+///
+/// Summarize the conversation if it exceeds a certain size (CONVERSATION_CHAR_LIMIT).
+/// We'll do that by calling `summarize_conversation` with the "deepseek-reasoner" model
+/// and replacing older messages with a summary message (keeping the original system message).
+async fn call_deepseek_api(
+    session: &mut ConversationSession,
+    model_name: &str,
+) -> Result<String> {
+
+    // If conversation is too large, summarize and reduce it
+    if estimate_conversation_size(&session) > CONVERSATION_CHAR_LIMIT {
+        // Summarize the conversation so far
+        let summary = summarize_conversation(session).await?;
+        // Replace older messages with the system message + summary
+        let original_system_msg = session
+            .messages
+            .iter()
+            .find(|m| matches!(m, Message::System(_)))
+            .cloned()
+            .unwrap_or(Message::System(
+                "You are an EXPERT AI ASSISTANT".to_string(),
+            ));
+
+        // We'll keep only the system message + a new "assistant" summary + 
+        // the last user message if there's one (so we keep the context of the user's question).
+        let last_user_message = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m, Message::User(_)))
+            .cloned();
+
+        session.messages.clear();
+        // Keep the original system message
+        session.messages.push(original_system_msg);
+
+        // Keep the summary as an "assistant" message
+        session.messages.push(Message::Assistant(
+            format!("(Conversation Summary)\n{}", summary)
+        ));
+
+        // Keep the last user message (if any) so the conversation makes sense
+        if let Some(user_msg) = last_user_message {
+            session.messages.push(user_msg);
+        }
     }
 
-    // Convert internal session messages -> DeepSeekMessage
+    // Convert session messages -> DeepSeekMessage
     let mut ds_messages = Vec::new();
     for msg in &session.messages {
         match msg {
@@ -495,11 +545,17 @@ async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
     }
 
     let req_body = DeepSeekChatRequest {
-        model: "deepseek-chat".to_string(),
+        model: model_name.to_string(),
         messages: ds_messages,
         stream: false,
         temperature: 0.7,
     };
+
+    let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        error!("Missing DEEPSEEK_API_KEY environment variable!");
+        return Err(anyhow!("DEEPSEEK_API_KEY not set"));
+    }
 
     let client = reqwest::Client::new();
     let resp = client
@@ -532,11 +588,81 @@ async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
 
 //
 // -----------------------------------------------------------------------------
+// Summarize the Whole Conversation (using deepseek-reasoner)
+// -----------------------------------------------------------------------------
+
+/// Summarize the entire conversation, focusing on user intent and relevant findings.
+/// This is called when the conversation gets too large.
+async fn summarize_conversation(session: &ConversationSession) -> Result<String> {
+    // Convert to text. We'll do something simplistic: user/assistant role labels plus message content.
+    let mut conversation_text = String::new();
+    for msg in &session.messages {
+        match msg {
+            Message::System(txt) => {
+                conversation_text.push_str("[System]\n");
+                conversation_text.push_str(txt);
+                conversation_text.push_str("\n\n");
+            }
+            Message::User(txt) => {
+                conversation_text.push_str("[User]\n");
+                conversation_text.push_str(txt);
+                conversation_text.push_str("\n\n");
+            }
+            Message::Assistant(txt) => {
+                conversation_text.push_str("[Assistant]\n");
+                conversation_text.push_str(txt);
+                conversation_text.push_str("\n\n");
+            }
+        }
+    }
+
+    // We'll build a minimal session specifically for summarization, using the "deepseek-reasoner" model
+    let mut summary_sess = ConversationSession::new();
+
+    // Keep the same system message we've had since the beginning (or a simpler directive).
+    // The user explicitly said "We always want to keep the system message the same" in normal usage,
+    // but for summarizing the conversation, let's give the reasoner a direct instruction:
+    summary_sess.messages.push(Message::System(
+        "You are a specialized summarizer (deepseek-reasoner). Summarize the following conversation. 
+Focus on user goals/intent, key points discovered, important data. Be concise but do not lose critical context. 
+Omit extraneous details.".to_string()
+    ));
+
+    // Then put the entire conversation in as user text:
+    summary_sess.messages.push(Message::User(conversation_text));
+
+    // Call the reasoner
+    let summary = call_deepseek_api(&mut summary_sess, "deepseek-reasoner").await?;
+    Ok(summary.trim().to_string())
+}
+
+//
+// -----------------------------------------------------------------------------
+// Utility to estimate conversation size
+// -----------------------------------------------------------------------------
+
+fn estimate_conversation_size(session: &ConversationSession) -> usize {
+    // Rough measure: total character length of all messages
+    // Not a perfect token count, but good enough for a threshold check
+    let mut total = 0;
+    for msg in &session.messages {
+        match msg {
+            Message::System(txt) => total += txt.len(),
+            Message::User(txt) => total += txt.len(),
+            Message::Assistant(txt) => total += txt.len(),
+        }
+    }
+    total
+}
+
+//
+// -----------------------------------------------------------------------------
 // Multi-Step Tool Calls with Reflection
 // -----------------------------------------------------------------------------
 
 /// Process tool calls in a loop, automatically re-invoking the LLM until <done/> or
 /// until we hit the max iteration limit. This is especially useful for multi-step pen-testing tasks.
+/// We always call `call_deepseek_api` with model="deepseek-chat" for normal conversation steps.
 pub async fn process_tool_calls(
     session: &mut ConversationSession,
     initial_response: String,
@@ -662,11 +788,18 @@ pub async fn process_tool_calls(
         }
 
         // Add tool results as an assistant message so the LLM can see it
-        let tool_msg = format!("Tool results:\n{}", tool_results_text);
-        session.messages.push(Message::Assistant(tool_msg.clone()));
+        session.messages.push(Message::Assistant(format!(
+            "Tool results:\n{}",
+            tool_results_text
+        )));
 
-        // Now re-invoke the LLM with the updated conversation
-        let next_response = timeout(Duration::from_secs(30), call_deepseek_api(session)).await??;
+        // Now re-invoke the LLM with the updated conversation, using "deepseek-chat"
+        let next_response = timeout(
+            Duration::from_secs(30),
+            call_deepseek_api(session, "deepseek-chat"),
+        )
+        .await??;
+
         current_response = next_response;
     }
 }
@@ -710,16 +843,19 @@ fn load_session_from_path(path: &PathBuf) -> ConversationSession {
 /// (one-shot, not interactive).
 async fn run_test_session(session_path: &str) -> Result<()> {
     let path = PathBuf::from(session_path);
-    let session = load_session_from_path(&path);
+    let mut session = load_session_from_path(&path);
 
     let messages = session.messages.clone();
 
     for msg in messages {
         if let Message::User(user_input) = msg {
-            let mut session = load_session_from_path(&path);
             println!("{} {}", "[User]".green().bold(), user_input);
 
-            let result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
+            let result = timeout(
+                Duration::from_secs(30),
+                call_deepseek_api(&mut session, "deepseek-chat"),
+            )
+            .await;
             let assistant_response = match result {
                 Ok(Ok(content)) => content,
                 Ok(Err(e)) => {
@@ -783,13 +919,14 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                         ));
                     }
                     ToolCall::GetVar { name } => {
-                        let result = match session.get_var(&name) {
+                        let found = session.get_var(&name);
+                        let out = match found {
                             Some(value) => format!("Variable '{}': {}", name, value),
                             None => format!("Variable '{}' not found", name),
                         };
                         tool_results_text.push_str(&format!(
                             "==== [GET VAR result] ====\n{}\n\n",
-                            result
+                            out
                         ));
                     }
                     ToolCall::SetVar { name, value } => {
@@ -809,7 +946,6 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             }
 
-            // Summarize if needed
             if tool_results_text.len() > 500 {
                 if let Ok(summary) = summarize_tool_output(&tool_results_text).await {
                     if !summary.is_empty() {
@@ -870,6 +1006,7 @@ async fn main() -> Result<()> {
         return run_test_session(&session_path).await;
     }
 
+    // The system message we always want to keep
     let preamble = r#"You are an EXPERT AI ASSISTANT. Your primary function is to assist users by answering their questions and performing tasks using a suite of TOOLS.  You are designed to handle complex, multi-step tasks, and you are equipped with tools to search the web, run bash commands, scrape web pages, and manage variables.
 
 **Your capabilities include:**
@@ -1039,8 +1176,8 @@ By following these guidelines and effectively using the provided tools, you can 
         println!("{} {}", "[User]".green().bold(), user_input);
         session.messages.push(Message::User(full_user_message));
 
-        // 2) Call the LLM with a simple timeout
-        let result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
+        // 2) Call the LLM with a simple timeout, always using "deepseek-chat" for normal conversation
+        let result = timeout(Duration::from_secs(30), call_deepseek_api(&mut session, "deepseek-chat")).await;
 
         let assistant_response = match result {
             Ok(Ok(content)) => content,
@@ -1111,13 +1248,14 @@ By following these guidelines and effectively using the provided tools, you can 
                     ));
                 }
                 ToolCall::GetVar { name } => {
-                    let result = match session.get_var(&name) {
+                    let found = session.get_var(&name);
+                    let out = match found {
                         Some(value) => format!("Variable '{}': {}", name, value),
                         None => format!("Variable '{}' not found", name),
                     };
                     tool_results_text.push_str(&format!(
                         "==== [GET VAR result] ====\n{}\n\n",
-                        result
+                        out
                     ));
                 }
                 ToolCall::SetVar { name, value } => {
@@ -1156,8 +1294,15 @@ By following these guidelines and effectively using the provided tools, you can 
             }
         }
 
+        // If we had tool results, we can place them in conversation
+        if !tool_results_text.is_empty() {
+            session.messages.push(Message::Assistant(format!(
+                "Tool results:\n{}",
+                tool_results_text
+            )));
+        }
+
         // 6) Add the assistant's raw response to the conversation
-        //    (so the user can see the "final" LLM text after any tool calls).
         let final_response = assistant_response.clone();
         session.messages.push(Message::Assistant(final_response.clone()));
 
