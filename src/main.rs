@@ -715,10 +715,14 @@ pub async fn process_tool_calls(
                         Ok(r) => r,
                         Err(e) => format!("ERROR during search: {}", e),
                     };
-                    tool_results_text.push_str(&format!(
-                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                        query, result
-                    ));
+                    // Show assistant message first
+                    println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
+                    // Then show tool results
+                    println!(
+                        "{} {}",
+                        "[Tool Results]".yellow().bold(),
+                        format!("==== [SEARCH result for \"{}\"] ====\n{}\n\n", query, result)
+                    );
                 }
                 ToolCall::Bash { command, args } => {
                     let full_cmd = format!("{} {}", command, args.join(" "));
@@ -726,21 +730,28 @@ pub async fn process_tool_calls(
                         Ok(r) => r,
                         Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
                     };
-                    tool_results_text.push_str(&format!(
-                        "{}\n{}\n",
-                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
-                        result
-                    ));
+                    // Show assistant message first
+                    println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
+                    // Then show tool results
+                    println!(
+                        "{} {}",
+                        "[Tool Results]".yellow().bold(),
+                        format!("{}\n{}\n", "==== [BASH COMMAND RESULTS] ====".yellow().bold(), result)
+                    );
                 }
                 ToolCall::Scrape { url, render_js } => {
                     let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
                         Ok(r) => r,
                         Err(e) => format!("ERROR during scrape: {}", e),
                     };
-                    tool_results_text.push_str(&format!(
-                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
-                        url, result
-                    ));
+                    // Show assistant message first
+                    println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
+                    // Then show tool results
+                    println!(
+                        "{} {}",
+                        "[Tool Results]".yellow().bold(),
+                        format!("==== [SCRAPE result for \"{}\"] ====\n{}\n\n", url, result)
+                    );
                 }
                 ToolCall::GetVar { name } => {
                     let result = match session.get_var(&name) {
