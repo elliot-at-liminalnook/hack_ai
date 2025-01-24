@@ -23,7 +23,7 @@ use url::Url;
 
 pub fn extract_text_from_html(html: &str, url: Option<&str>) -> String {
     // Limit HTML size to prevent stack overflows
-    const MAX_HTML_SIZE: usize = 100_000; // 100KB
+    const MAX_HTML_SIZE: usize = 3_000_000; // 100KB
     let html = if html.len() > MAX_HTML_SIZE {
         &html[..MAX_HTML_SIZE]
     } else {
