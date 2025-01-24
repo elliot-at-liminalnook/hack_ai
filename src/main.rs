@@ -821,58 +821,15 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
             }
         }
 
-        // If we had tool calls, we now add one more “assistant” message
-        // so the conversation chain includes the results. The LLM can then reference them.
-        if !tool_results_text.is_empty() {
-            let tool_msg = format!("Tool results:\n{}", tool_results_text);
-            session.messages.push(Message::Assistant(tool_msg.clone()));
+        // Add final response to conversation
+        session.messages.push(Message::Assistant(final_response.clone()));
 
-            // Add reflection step
-            let reflection_prompt = format!(
-                "Review the tool results and determine if additional steps are needed:\n\n{}\n\n\
-                Provide your analysis in a <reflection> block with:\n\
-                - Summary of findings\n\
-                - Assessment of result quality\n\
-                - Next steps if needed\n\
-                - Any errors to fix\n\
-                - Final conclusion\n\
-                </reflection>",
-                tool_msg
-            );
-
-            // Call LLM for reflection
-            let reflection_result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
-            if let Ok(Ok(reflection)) = reflection_result {
-                // Parse and display reflection
-                let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
-                if let Some(cap) = re_reflection.captures(&reflection) {
-                    let reflection_text = cap[1].trim();
-                    println!(
-                        "{} {}\n",
-                        "[Reflection]".magenta().bold(),
-                        reflection_text
-                    );
-                    session.messages.push(Message::Assistant(format!(
-                        "Reflection on tool results:\n{}",
-                        reflection_text
-                    )));
-                }
-            }
-        }
-
-        // 5) Show the assistant’s textual response to the user (minus the <tool> blocks)
-        let display_text = &assistant_response.trim().to_string();
-        if !display_text.is_empty() {
-            // Save it to conversation
-            session
-                .messages
-                .push(Message::Assistant(display_text.clone()));
-
-            // Print it colorized
+        // Show the final response
+        if !final_response.is_empty() {
             println!(
                 "{} {}",
                 "[Assistant]".blue().bold(),
-                display_text
+                final_response
             );
         }
 
