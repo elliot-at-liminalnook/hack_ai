@@ -491,6 +491,9 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             url, result
                         ));
                     }
+                    ToolCall::GetVar(_) => todo!(),
+                    ToolCall::SetVar(_) => todo!(),
+                    ToolCall::ListVars => todo!(),
                 }
             }
 
