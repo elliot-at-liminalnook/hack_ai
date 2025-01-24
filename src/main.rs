@@ -1319,8 +1319,33 @@ By following these guidelines and effectively using the provided tools, you can 
             
             // Build a temporary session with the thinking prompt
             let mut think_sess = session.clone();
-            think_sess.messages.push(Message::System(
-                format!("You are a deep thinker (deepseek-reasoner). Analyze the following conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.", to_think)
+            
+            // Convert conversation to a single user message
+            let mut conversation_text = String::new();
+            for msg in &think_sess.messages {
+                match msg {
+                    Message::System(txt) => {
+                        conversation_text.push_str("[System]\n");
+                        conversation_text.push_str(txt);
+                        conversation_text.push_str("\n\n");
+                    }
+                    Message::User(txt) => {
+                        conversation_text.push_str("[User]\n");
+                        conversation_text.push_str(txt);
+                        conversation_text.push_str("\n\n");
+                    }
+                    Message::Assistant(txt) => {
+                        conversation_text.push_str("[Assistant]\n");
+                        conversation_text.push_str(txt);
+                        conversation_text.push_str("\n\n");
+                    }
+                }
+            }
+            
+            // Keep only system message and the combined conversation as user message
+            think_sess.messages.retain(|m| matches!(m, Message::System(_)));
+            think_sess.messages.push(Message::User(
+                format!("Analyze this conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.\n\nConversation:\n{}", to_think, conversation_text)
             ));
             
             match call_deepseek_api(&mut think_sess, "deepseek-reasoner").await {
