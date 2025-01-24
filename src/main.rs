@@ -704,6 +704,9 @@ pub async fn process_tool_calls(
         }
 
         let mut tool_results_text = String::new();
+        // Show assistant message first
+        println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
+        
         for call in tool_calls {
             match call {
                 ToolCall::Search {
@@ -715,14 +718,16 @@ pub async fn process_tool_calls(
                         Ok(r) => r,
                         Err(e) => format!("ERROR during search: {}", e),
                     };
-                    // Show assistant message first
-                    println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
                     // Then show tool results
                     println!(
                         "{} {}",
                         "[Tool Results]".yellow().bold(),
                         format!("==== [SEARCH result for \"{}\"] ====\n{}\n\n", query, result)
                     );
+                    tool_results_text.push_str(&format!(
+                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
+                        query, result
+                    ));
                 }
                 ToolCall::Bash { command, args } => {
                     let full_cmd = format!("{} {}", command, args.join(" "));
@@ -730,28 +735,33 @@ pub async fn process_tool_calls(
                         Ok(r) => r,
                         Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
                     };
-                    // Show assistant message first
-                    println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
                     // Then show tool results
                     println!(
                         "{} {}",
                         "[Tool Results]".yellow().bold(),
                         format!("{}\n{}\n", "==== [BASH COMMAND RESULTS] ====".yellow().bold(), result)
                     );
+                    tool_results_text.push_str(&format!(
+                        "{}\n{}\n",
+                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                        result
+                    ));
                 }
                 ToolCall::Scrape { url, render_js } => {
                     let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
                         Ok(r) => r,
                         Err(e) => format!("ERROR during scrape: {}", e),
                     };
-                    // Show assistant message first
-                    println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
                     // Then show tool results
                     println!(
                         "{} {}",
                         "[Tool Results]".yellow().bold(),
                         format!("==== [SCRAPE result for \"{}\"] ====\n{}\n\n", url, result)
                     );
+                    tool_results_text.push_str(&format!(
+                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
+                        url, result
+                    ));
                 }
                 ToolCall::GetVar { name } => {
                     let result = match session.get_var(&name) {
