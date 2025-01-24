@@ -22,16 +22,29 @@ use url::Url;
 // -----------------------------------------------------------------------------
 
 pub fn extract_text_from_html(html: &str, url: Option<&str>) -> String {
-    let mut text = from_read(html.as_bytes(), 80).expect("Failed to parse HTML");
+    // Limit HTML size to prevent stack overflows
+    const MAX_HTML_SIZE: usize = 100_000; // 100KB
+    let html = if html.len() > MAX_HTML_SIZE {
+        &html[..MAX_HTML_SIZE]
+    } else {
+        html
+    };
+
+    // Use a Box to move the HTML processing to the heap
+    let text = Box::new(move || {
+        from_read(html.as_bytes(), 80).unwrap_or_else(|_| "Failed to parse HTML".into())
+    })();
 
     // If URL provided, add it as reference
     if let Some(url_str) = url {
         if let Ok(parsed_url) = Url::parse(url_str) {
+            let mut text = text;
             text.push_str(&format!("\n\nSource: {}", url_str));
 
             if let Some(domain) = parsed_url.domain() {
                 text.push_str(&format!("\nDomain: {}", domain));
             }
+            return text;
         }
     }
 
