@@ -1152,6 +1152,33 @@ By following these guidelines and effectively using the provided tools, you can 
         if user_input.to_lowercase() == "/exit" {
             println!("{}", "Goodbye!".green());
             break;
+        } else if user_input.to_lowercase() == "/clear" {
+            // Summarize and reset the conversation
+            match summarize_conversation(&session).await {
+                Ok(summary) => {
+                    // Keep only the system message and summary
+                    let system_msg = session.messages.iter()
+                        .find(|m| matches!(m, Message::System(_)))
+                        .cloned()
+                        .unwrap_or(Message::System(preamble.to_string()));
+                    
+                    session.messages = vec![
+                        system_msg,
+                        Message::Assistant(format!("(Conversation Summary)\n{}", summary))
+                    ];
+                    
+                    // Clear variables and long_context
+                    session.variables.clear();
+                    session.long_context = Value::Object(serde_json::Map::new());
+                    
+                    println!("{}", "Conversation cleared and summarized.".green());
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("{}: {}", "Error summarizing conversation".red(), e);
+                    continue;
+                }
+            }
         }
 
         // Include the summarized long_context and recent vars in the user's message for AI reference
