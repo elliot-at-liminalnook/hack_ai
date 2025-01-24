@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufRead;
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{error, info};
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -497,11 +497,16 @@ fn load_session_from_path(path: &PathBuf) -> ConversationSession {
 /// Run a session file in test mode - process all messages and show results
 async fn run_test_session(session_path: &str) -> Result<()> {
     let path = PathBuf::from(session_path);
-    let mut session = load_session_from_path(&path);
+    let session = load_session_from_path(&path);
+    
+    // Clone messages to avoid borrowing issues
+    let messages = session.messages.clone();
     
     // Process each user message in sequence
-    for msg in &session.messages {
+    for msg in messages {
         if let Message::User(user_input) = msg {
+            // Create a new mutable session for each iteration
+            let mut session = load_session_from_path(&path);
             println!("{} {}", "[User]".green().bold(), user_input);
             
             // Call the LLM
