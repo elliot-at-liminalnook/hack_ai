@@ -73,6 +73,9 @@ const MAX_ITERATIONS: usize = 10;
 /// (64k tokens ~ ~240k characters, so we'll use 200k as a rough threshold just to be safe).
 const CONVERSATION_CHAR_LIMIT: usize = 200_000;
 
+/// Maximum size for tool results to be stored in session (100KB)
+const MAX_TOOL_RESULT_SIZE: usize = 100_000;
+
 /// The entire conversation session, which we store in JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSession {
@@ -1478,12 +1481,18 @@ By following these guidelines and effectively using the provided tools, you can 
             }
         }
 
-        // If we had tool results, we can place them in conversation
+        // If we had tool results, we can place them in conversation if they're not too large
         if !tool_results_text.is_empty() {
-            session.messages.push(Message::Assistant(format!(
-                "Tool results:\n{}",
-                tool_results_text
-            )));
+            if tool_results_text.len() <= MAX_TOOL_RESULT_SIZE {
+                session.messages.push(Message::Assistant(format!(
+                    "Tool results:\n{}",
+                    tool_results_text
+                )));
+            } else {
+                session.messages.push(Message::Assistant(
+                    "Tool results too large to store in session".to_string()
+                ));
+            }
         }
 
         // 6) Add the assistant's raw response to the conversation
