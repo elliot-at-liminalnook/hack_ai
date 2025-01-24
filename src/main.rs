@@ -50,11 +50,36 @@ pub enum Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSession {
     pub messages: Vec<Message>,
+    pub variables: std::collections::HashMap<String, String>,
 }
 
 impl ConversationSession {
     pub fn new() -> Self {
-        Self { messages: vec![] }
+        Self { 
+            messages: vec![],
+            variables: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Get a variable value by key
+    pub fn get_var(&self, key: &str) -> Option<&String> {
+        self.variables.get(key)
+    }
+
+    /// Set a variable value
+    pub fn set_var(&mut self, key: String, value: String) {
+        self.variables.insert(key, value);
+    }
+
+    /// List all variables
+    pub fn list_vars(&self) -> String {
+        if self.variables.is_empty() {
+            return "No variables stored".to_string();
+        }
+        self.variables.iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -68,6 +93,9 @@ pub enum ToolCall {
     Search(String),
     Bash(String),
     Scrape(String),
+    GetVar(String),      // <get var>name</get var>
+    SetVar(String),      // <set var>name=value</set var>
+    ListVars,            // <list vars/>
 }
 
 //
@@ -335,6 +363,23 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
     for cap in re_scrape.captures_iter(assistant_text) {
         let url = cap[1].trim().to_string();
         calls.push(ToolCall::Scrape(url));
+    }
+
+    let re_get_var = Regex::new(r"(?s)<get var>(.*?)</get var>").unwrap();
+    for cap in re_get_var.captures_iter(assistant_text) {
+        let var_name = cap[1].trim().to_string();
+        calls.push(ToolCall::GetVar(var_name));
+    }
+
+    let re_set_var = Regex::new(r"(?s)<set var>(.*?)</set var>").unwrap();
+    for cap in re_set_var.captures_iter(assistant_text) {
+        let var_expr = cap[1].trim().to_string();
+        calls.push(ToolCall::SetVar(var_expr));
+    }
+
+    let re_list_vars = Regex::new(r"(?s)<list vars/>").unwrap();
+    if re_list_vars.is_match(assistant_text) {
+        calls.push(ToolCall::ListVars);
     }
 
     calls
@@ -629,6 +674,39 @@ Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
                     tool_results_text.push_str(&format!(
                         "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
                         url, result
+                    ));
+                }
+                ToolCall::GetVar(var_name) => {
+                    let result = match session.get_var(&var_name) {
+                        Some(value) => format!("Variable '{}': {}", var_name, value),
+                        None => format!("Variable '{}' not found", var_name),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [GET VAR result] ====\n{}\n\n",
+                        result
+                    ));
+                }
+                ToolCall::SetVar(var_expr) => {
+                    let parts: Vec<&str> = var_expr.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        let var_name = parts[0].trim().to_string();
+                        let var_value = parts[1].trim().to_string();
+                        session.set_var(var_name.clone(), var_value.clone());
+                        tool_results_text.push_str(&format!(
+                            "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
+                            var_name, var_value
+                        ));
+                    } else {
+                        tool_results_text.push_str(&format!(
+                            "==== [SET VAR ERROR] ====\nInvalid format. Use: <set var>name=value</set var>\n\n"
+                        ));
+                    }
+                }
+                ToolCall::ListVars => {
+                    let result = session.list_vars();
+                    tool_results_text.push_str(&format!(
+                        "==== [LIST VARS result] ====\n{}\n\n",
+                        result
                     ));
                 }
             }
