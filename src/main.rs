@@ -1351,14 +1351,28 @@ By following these guidelines and effectively using the provided tools, you can 
             match call_deepseek_api(&mut think_sess, "deepseek-reasoner").await {
                 Ok(response) => {
                     println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
-                    // Add the thought to the main conversation
-                    session.messages.push(Message::Assistant(format!(
-                        "(Deep Thought about '{}')\n{}",
-                        to_think, response
-                    )));
+                    
+                    // Add the deep thought to both the main session and long_context
+                    let thought = format!("(Deep Thought about '{}')\n{}", to_think, response);
+                    
+                    // Add to messages
+                    session.messages.push(Message::Assistant(thought.clone()));
+                    
+                    // Add to long_context
+                    session.append_to_long_context(
+                        "deep_thoughts",
+                        &json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "topic": to_think,
+                            "thought": thought
+                        }),
+                    );
                 }
                 Err(e) => {
                     eprintln!("{}: {}", "Error during deep thinking".red(), e);
+                    session.messages.push(Message::Assistant(
+                        format!("Error during deep thinking: {}", e)
+                    ));
                 }
             }
             continue;
