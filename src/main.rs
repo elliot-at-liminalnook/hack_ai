@@ -1,0 +1,533 @@
+use anyhow::{anyhow, Result};
+use colored::*;
+use html2text::from_read;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::time::timeout;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+use url::Url;
+
+pub fn extract_text_from_html(html: &str, url: Option<&str>) -> String {
+    let mut text = from_read(html.as_bytes(), 80).expect("Failed to parse HTML");
+
+    // If URL provided, add it as reference
+    if let Some(url_str) = url {
+        if let Ok(parsed_url) = Url::parse(url_str) {
+            text.push_str(&format!("\n\nSource: {}", url_str));
+
+            if let Some(domain) = parsed_url.domain() {
+                text.push_str(&format!("\nDomain: {}", domain));
+            }
+        }
+    }
+
+    text
+}
+
+//
+// -----------------------------------------------------------------------------
+// 1. Data Structures: Conversation, Messages, Tool Calls
+// -----------------------------------------------------------------------------
+
+/// Represents a single message in the conversation: system, user, or assistant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "role", content = "content")]
+pub enum Message {
+    System(String),
+    User(String),
+    Assistant(String),
+}
+
+/// The entire conversation session, which we store in JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSession {
+    pub messages: Vec<Message>,
+}
+
+impl ConversationSession {
+    pub fn new() -> Self {
+        Self { messages: vec![] }
+    }
+}
+
+/// Simple wrapper to highlight possible tool calls found in the assistant response.
+/// We parse them with regex. Example blocks:
+/// <search>some query</search>
+/// <bash>some bash command</bash>
+/// <scrape url>https://example.com</scrape url>
+#[derive(Debug)]
+pub enum ToolCall {
+    Search(String),
+    Bash(String),
+    Scrape(String),
+}
+
+//
+// -----------------------------------------------------------------------------
+// 2. Minimal Tool Implementations (Search, Bash, Scrape)
+//    We’ll use simplified “defaults” for each.
+// -----------------------------------------------------------------------------
+
+// -- 2.1 Bash Tool
+async fn run_bash_command(command: &str) -> Result<String> {
+    // A very naive implementation (blocking). For real usage, we might do more robust logic:
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(-1);
+
+    let result = format!(
+        "Bash Command: {}\nExit Code: {}\nStdout:\n{}\nStderr:\n{}",
+        command, code, stdout, stderr
+    );
+    Ok(result)
+}
+
+// -- 2.2 Search Tool (using the Brave Search snippet you provided, but simplified)
+async fn run_search(query: &str) -> Result<String> {
+    // For demonstration, we’ll do a simple GET to Brave Search API or
+    // you can replace it with a mock or actual logic.
+    //
+    // In real usage, put your Brave API key in an environment variable: BRAVE_SEARCH_API_KEY
+    let api_key = env::var("BRAVE_SEARCH_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return Ok(
+            "No BRAVE_SEARCH_API_KEY found. Provide one to enable real searching.".to_string(),
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let url = "https://api.search.brave.com/res/v1/web/search";
+
+    // Basic parameters
+    let params = [("q", query), ("count", "20"), ("safesearch", "moderate")];
+
+    // Build the request
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("X-Subscription-Token", api_key.parse()?);
+
+    let resp = client
+        .get(url)
+        .headers(headers)
+        .query(&params)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await?;
+        return Err(anyhow!("Brave Search error: {text}"));
+    }
+
+    // We’ll just return raw JSON
+    let json_response = resp.text().await?;
+    let result = format!(
+        "Search Query: {}\nBrave Search Results:\n{}",
+        query, json_response
+    );
+    Ok(result)
+}
+
+// -- 2.3 Scrape Tool (using simplified ScrapingBee logic)
+async fn run_scrape(url: &str) -> Result<String> {
+    // For real usage, put your ScrapingBee API key in SCRAPINGBEE_API_KEY
+    let api_key = env::var("SCRAPINGBEE_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return Ok(
+            "No SCRAPINGBEE_API_KEY found. Provide one to enable real scraping.".to_string(),
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let base_url = "https://app.scrapingbee.com/api/v1/";
+
+    let resp = client
+        .get(base_url)
+        .query(&[
+            ("api_key", &api_key),
+            ("url", &url.to_string()),
+            ("render_js", &"true".to_string()),
+        ])
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await?;
+        return Err(anyhow!("ScrapingBee error: {text}"));
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if content_type.contains("text") || content_type.contains("json") {
+        let text = resp.text().await?;
+        let readable_text = extract_text_from_html(&text, Some(url));
+        let result = format!("Scraped URL: {}\nExtracted Text:\n{}", url, readable_text);
+        Ok(result)
+    } else {
+        let bytes = resp.bytes().await?;
+        let result = format!(
+            "Scraped URL: {}\nReceived {} bytes of binary data.",
+            url,
+            bytes.len()
+        );
+        Ok(result)
+    }
+}
+
+//
+// -----------------------------------------------------------------------------
+// 3. LLM Call: DeepSeek Chat (OpenAI-compatible format)
+// -----------------------------------------------------------------------------
+
+/// We convert our internal conversation to the JSON format that DeepSeek expects.
+#[derive(Debug, Serialize)]
+struct DeepSeekChatRequest {
+    model: String,
+    messages: Vec<DeepSeekMessage>,
+    stream: bool,
+    temperature: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct DeepSeekMessage {
+    role: String,
+    content: String,
+}
+
+/// Perform a single chat completion call to DeepSeek with the entire conversation.
+async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
+    let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        error!("Missing DEEPSEEK_API_KEY environment variable!");
+        return Err(anyhow!("DEEPSEEK_API_KEY not set"));
+    }
+
+    // Convert internal session messages -> DeepSeekMessage
+    let mut ds_messages = Vec::new();
+    for msg in &session.messages {
+        match msg {
+            Message::System(txt) => ds_messages.push(DeepSeekMessage {
+                role: "system".into(),
+                content: txt.clone(),
+            }),
+            Message::User(txt) => ds_messages.push(DeepSeekMessage {
+                role: "user".into(),
+                content: txt.clone(),
+            }),
+            Message::Assistant(txt) => ds_messages.push(DeepSeekMessage {
+                role: "assistant".into(),
+                content: txt.clone(),
+            }),
+        }
+    }
+
+    let req_body = DeepSeekChatRequest {
+        model: "deepseek-chat".to_string(),
+        messages: ds_messages,
+        stream: false,
+        temperature: 0.7,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.deepseek.com/chat/completions")
+        .bearer_auth(api_key)
+        .json(&req_body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await?;
+        return Err(anyhow!("DeepSeek API Error: {}", text));
+    }
+
+    // The response body should match an OpenAI-like structure
+    let json_resp: Value = resp.json().await?;
+    // Usually: { "choices": [ { "message": {"role":"assistant","content":"hello"} } ], ... }
+    if let Some(choices) = json_resp.get("choices") {
+        if let Some(first_choice) = choices.get(0) {
+            if let Some(msg) = first_choice.get("message") {
+                if let Some(content) = msg.get("content") {
+                    let content_str = content.as_str().unwrap_or("").to_string();
+                    return Ok(content_str);
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("No valid content in DeepSeek API response"))
+}
+
+//
+// -----------------------------------------------------------------------------
+// 4. Parsing the Assistant's Tool Calls (<search>, <bash>, <scrape url>, etc.)
+// -----------------------------------------------------------------------------
+
+/// For the MVP, we use a few regexes to find all tool calls in the assistant’s text.
+/// e.g. <search>some query</search>  
+/// We do this in a naive, repeated way. Each match includes the entire snippet.
+fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+
+    let re_search = Regex::new(r"(?s)<search>(.*?)</search>").unwrap();
+    for cap in re_search.captures_iter(assistant_text) {
+        let query = cap[1].trim().to_string();
+        calls.push(ToolCall::Search(query));
+    }
+
+    let re_bash = Regex::new(r"(?s)<bash>(.*?)</bash>").unwrap();
+    for cap in re_bash.captures_iter(assistant_text) {
+        let cmd = cap[1].trim().to_string();
+        calls.push(ToolCall::Bash(cmd));
+    }
+
+    let re_scrape = Regex::new(r"(?s)<scrape url>(.*?)</scrape url>").unwrap();
+    for cap in re_scrape.captures_iter(assistant_text) {
+        let url = cap[1].trim().to_string();
+        calls.push(ToolCall::Scrape(url));
+    }
+
+    calls
+}
+
+/// Remove the tool blocks from the assistant’s textual response
+/// so the final “display text” for the user is cleaned up.
+fn remove_tool_blocks(assistant_text: &str) -> String {
+    let re_tool_blocks =
+        Regex::new(r"(?s)<(search|bash|scrape url)>(.*?)</(search|bash|scrape url)>").unwrap();
+    re_tool_blocks.replace_all(assistant_text, "").to_string()
+}
+
+//
+// -----------------------------------------------------------------------------
+// 5. Session Persistence
+// -----------------------------------------------------------------------------
+
+/// Save the conversation to `session.json`.
+fn save_session(session: &ConversationSession) -> Result<()> {
+    let path = PathBuf::from("session.json");
+    let file = File::create(path)?;
+    serde_json::to_writer_pretty(file, session)?;
+    Ok(())
+}
+
+/// Load an existing session from `session.json`, if it exists.
+fn load_session() -> ConversationSession {
+    let path = PathBuf::from("session.json");
+    if path.exists() {
+        match File::open(&path) {
+            Ok(file) => {
+                if let Ok(sess) = serde_json::from_reader(file) {
+                    return sess;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    ConversationSession::new()
+}
+
+//
+// -----------------------------------------------------------------------------
+// 6. Main CLI Loop
+// -----------------------------------------------------------------------------
+
+#[tokio::main]
+async fn main() -> Result<()> {
+
+
+    let preamble = r#"You are an EXPERT AI ASSISTANT whose PRIMARY FUNCTION is to use tools to answer user questions.  You are **required** to use tools whenever they can provide a more accurate, up-to-date, or comprehensive answer than your internal knowledge.
+
+You have access to the following **essential tools**:
+
+* `<search>query</search>`: **YOU MUST USE THIS TOOL WHENEVER THE USER ASKS A QUESTION THAT REQUIRES INFORMATION FROM THE INTERNET, CURRENT EVENTS, FACTS, OR SPECIFIC WEB CONTENT.**  Do not answer from your internal knowledge if a search could provide a better or more current answer.  **You are explicitly designed to search the internet when needed.**  Do not say you "cannot search the internet"; you CAN and MUST use the `<search>` tool.
+
+* `<bash>command</bash>`: Use this tool to execute safe bash commands for system-related tasks. **Use this tool if the user explicitly asks for system information or to perform a command.** Be extremely careful with security and only execute safe commands.
+
+* `<scrape url>URL</scrape url>`: Use this tool to get the text content of webpages. **USE THIS TOOL IF A SEARCH RESULT POINTS TO A RELEVANT WEBPAGE OR IF THE USER ASKS FOR INFORMATION LIKELY CONTAINED ON A SPECIFIC WEBSITE.**
+
+**YOUR OPERATING PROCEDURE IS AS FOLLOWS:**
+
+1. **Analyze User Request:** Understand what the user is asking.
+2. **IMMEDIATELY CONSIDER TOOL USE:**  **For almost every question, your first thought MUST be: "Can a tool help me answer this better?"**
+3. **PRIORITIZE SEARCH:** **If the question relates to facts, current events, or anything that might be on the internet, YOU MUST USE the `<search>` tool FIRST.**  Do not rely on your internal knowledge for these types of questions.
+4. **Use `<bash>` or `<scrape>` if relevant:**  If the user's request implies a system command or scraping a webpage, use those tools accordingly.
+5. **If NO tool is genuinely needed (very rare for information-seeking questions), then and ONLY then answer directly.**
+6. **Respond clearly:** Tell the user what you are doing and if you used a tool. Example: "I am using the `<search>` tool to find..." or "Based on my search results..."
+
+**YOU ARE DESIGNED TO BE A TOOL-USING AI.  YOUR VALUE COMES FROM YOUR ABILITY TO USE TOOLS EFFECTIVELY.  DO NOT HESITATE TO USE TOOLS. USE THEM PROACTIVELY AND FREQUENTLY.**
+
+**Example of REQUIRED tool use:**
+
+User: "What is the weather in Paris right now?"
+Assistant: `<search>current weather in Paris</search>`  **<-- CORRECT - TOOL USED**
+Assistant: "The weather in Paris is sunny." **<-- INCORRECT - ANSWERING WITHOUT TOOL WHEN TOOL IS NEEDED**
+
+User: "List files in my home directory."
+Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
+
+**FAILURE TO USE TOOLS WHEN APPROPRIATE IS A CRITICAL ERROR.**  Ensure you are always checking if a tool can improve your answer before responding from internal knowledge."#;
+
+    // Initialize logging with log level from RUST_LOG or LOG_LEVEL environment
+    let filter = EnvFilter::from_default_env();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
+    println!(
+        "{}",
+        "Welcome to the Turn-Based LLM CLI (DeepSeek)!"
+            .bold()
+            .bright_cyan()
+    );
+    println!("Type your messages and press Enter. Type '/exit' to quit.\n");
+
+    // Load or initialize the conversation
+    let mut session = load_session();
+    if session.messages.is_empty() {
+        // You can provide an initial system role instruction if you want
+        session.messages.push(Message::System(
+            preamble.to_string()
+        ));
+    }
+
+    // REPL loop
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let user_input = line?.trim().to_string();
+
+        if user_input.to_lowercase() == "/exit" {
+            println!("{}", "Goodbye!".green());
+            break;
+        }
+
+        // 1) Add the user’s message to the conversation
+        session.messages.push(Message::User(user_input.clone()));
+
+        // 2) Call the LLM
+        // (with a simple timeout to avoid indefinite hang - 30s for demo)
+        let result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
+
+        let assistant_response = match result {
+            Ok(Ok(content)) => content,
+            Ok(Err(e)) => {
+                eprintln!("{}: {}", "[Error from LLM]".red(), e.to_string());
+                session
+                    .messages
+                    .push(Message::Assistant(format!("Error from LLM: {e}")));
+                continue;
+            }
+            Err(_) => {
+                eprintln!("{}", "[Timed out waiting for LLM]".red());
+                session
+                    .messages
+                    .push(Message::Assistant("DeepSeek API timed out.".into()));
+                continue;
+            }
+        };
+
+        // 3) Parse out any tool calls
+        let tool_calls = parse_tool_calls(&assistant_response);
+
+        // 4) If there are tool calls, we run them all in sequence, gather results,
+        //    then append them to the conversation so the LLM can “see” those results.
+        let mut tool_results_text = String::new();
+        for call in tool_calls {
+            match call {
+                ToolCall::Search(q) => {
+                    let result = match run_search(&q).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during search: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
+                        q, result
+                    ));
+                }
+                ToolCall::Bash(cmd) => {
+                    let result = match run_bash_command(&cmd).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during bash: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [BASH result for \"{}\"] ====\n{}\n\n",
+                        cmd, result
+                    ));
+                }
+                ToolCall::Scrape(url) => {
+                    let result = match run_scrape(&url).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during scrape: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
+                        url, result
+                    ));
+                }
+            }
+        }
+
+        // If we had tool calls, we now add one more “assistant” message
+        // so the conversation chain includes the results. The LLM can then reference them.
+        if !tool_results_text.is_empty() {
+            let tool_msg = format!("Tool results:\n{}", tool_results_text);
+            session.messages.push(Message::Assistant(tool_msg));
+
+            // Optionally, call the LLM again so it can comment on the tool results.
+            // But for an MVP, we might let the user read the tool results first,
+            // then the user asks for next steps.
+            //
+            // In this example, we do NOT automatically call the LLM again
+            // because we’re “turn-based.” But you could if desired.
+        }
+
+        // 5) Show the assistant’s textual response to the user (minus the <tool> blocks)
+        let display_text = &assistant_response.trim().to_string();
+        if !display_text.is_empty() {
+            // Save it to conversation
+            session
+                .messages
+                .push(Message::Assistant(display_text.clone()));
+
+            // Print it colorized
+            println!(
+                "{} {}",
+                "[Assistant]".blue().bold(),
+                format_markdown(&display_text)
+            );
+        }
+
+        // 6) Save the updated session
+        if let Err(e) = save_session(&session) {
+            eprintln!("Failed to save session: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// A super-minimal “Markdown highlighter” to brighten output in the terminal.
+fn format_markdown(txt: &str) -> String {
+    // For an MVP, we just color bold markers `**text**`
+    let re_bold = Regex::new(r"\*\*(.+?)\*\*").unwrap();
+    re_bold
+        .replace_all(txt, |caps: &regex::Captures| {
+            format!("{}", caps[1].bold().underline())
+        })
+        .to_string()
+}
