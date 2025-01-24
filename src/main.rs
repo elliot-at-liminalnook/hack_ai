@@ -1309,6 +1309,34 @@ By following these guidelines and effectively using the provided tools, you can 
                     continue;
                 }
             }
+        } else if user_input.to_lowercase().starts_with("/think ") {
+            // Extract what to think about
+            let to_think = user_input[7..].trim();
+            if to_think.is_empty() {
+                println!("{}", "Please specify what to think about".red());
+                continue;
+            }
+            
+            // Build a temporary session with the thinking prompt
+            let mut think_sess = session.clone();
+            think_sess.messages.push(Message::System(
+                format!("You are a deep thinker (deepseek-reasoner). Analyze the following conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.", to_think)
+            ));
+            
+            match call_deepseek_api(&mut think_sess, "deepseek-reasoner").await {
+                Ok(response) => {
+                    println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
+                    // Add the thought to the main conversation
+                    session.messages.push(Message::Assistant(format!(
+                        "(Deep Thought about '{}')\n{}",
+                        to_think, response
+                    )));
+                }
+                Err(e) => {
+                    eprintln!("{}: {}", "Error during deep thinking".red(), e);
+                }
+            }
+            continue;
         } else if user_input.to_lowercase() == "/clear" {
             // Summarize and reset the conversation
             match summarize_conversation(&session).await {
