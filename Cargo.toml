@@ -1,0 +1,19 @@
+[package]
+name = "smart_cli"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1.28", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1" 
+tracing-subscriber = { version = "0.3", features = ["env-filter"]}
+colored = "2.0"
+regex = "1.11.1"
+html2text = "0.13.6"
+url = "2.5.4"
+clap = { version = "4.5.27", features = ["derive"] }
