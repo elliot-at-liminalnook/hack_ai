@@ -555,31 +555,22 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             url, result
                         ));
                     }
-                    ToolCall::GetVar(var_name) => {
-                        let result = match session.get_var(&var_name) {
-                            Some(value) => format!("Variable '{}': {}", var_name, value),
-                            None => format!("Variable '{}' not found", var_name),
+                    ToolCall::GetVar { name } => {
+                        let result = match session.get_var(&name) {
+                            Some(value) => format!("Variable '{}': {}", name, value),
+                            None => format!("Variable '{}' not found", name),
                         };
                         tool_results_text.push_str(&format!(
                             "==== [GET VAR result] ====\n{}\n\n",
                             result
                         ));
                     }
-                    ToolCall::SetVar(var_expr) => {
-                        let parts: Vec<&str> = var_expr.splitn(2, '=').collect();
-                        if parts.len() == 2 {
-                            let var_name = parts[0].trim().to_string();
-                            let var_value = parts[1].trim().to_string();
-                            session.set_var(var_name.clone(), var_value.clone());
-                            tool_results_text.push_str(&format!(
-                                "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
-                                var_name, var_value
-                            ));
-                        } else {
-                            tool_results_text.push_str(&format!(
-                                "==== [SET VAR ERROR] ====\nInvalid format. Use: <set var>name=value</set var>\n\n"
-                            ));
-                        }
+                    ToolCall::SetVar { name, value } => {
+                        session.set_var(name.clone(), value.clone());
+                        tool_results_text.push_str(&format!(
+                            "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
+                            name, value
+                        ));
                     }
                     ToolCall::ListVars => {
                         let result = session.list_vars();
