@@ -594,6 +594,44 @@ async fn call_deepseek_api(
 // Summarize the Whole Conversation (using deepseek-reasoner)
 // -----------------------------------------------------------------------------
 
+/// Summarize the entire conversation while specifically excluding certain information
+async fn forget_conversation(session: &ConversationSession, to_forget: &str) -> Result<String> {
+    // Convert to text
+    let mut conversation_text = String::new();
+    for msg in &session.messages {
+        match msg {
+            Message::System(txt) => {
+                conversation_text.push_str("[System]\n");
+                conversation_text.push_str(txt);
+                conversation_text.push_str("\n\n");
+            }
+            Message::User(txt) => {
+                conversation_text.push_str("[User]\n");
+                conversation_text.push_str(txt);
+                conversation_text.push_str("\n\n");
+            }
+            Message::Assistant(txt) => {
+                conversation_text.push_str("[Assistant]\n");
+                conversation_text.push_str(txt);
+                conversation_text.push_str("\n\n");
+            }
+        }
+    }
+
+    // Build a minimal session specifically for forgetting
+    let mut forget_sess = ConversationSession::new();
+    forget_sess.messages.push(Message::System(
+        format!("You are a specialized summarizer (deepseek-reasoner). Summarize the following conversation while specifically EXCLUDING any information about '{}'. Focus on user goals/intent and key points, but ensure you do not mention or include anything related to '{}'. Be concise but do not lose critical context. Omit extraneous details.", to_forget, to_forget)
+    ));
+
+    // Then put the entire conversation in as user text:
+    forget_sess.messages.push(Message::User(conversation_text));
+
+    // Call the reasoner
+    let summary = call_deepseek_api(&mut forget_sess, "deepseek-reasoner").await?;
+    Ok(summary.trim().to_string())
+}
+
 /// Summarize the entire conversation, focusing on user intent and relevant findings.
 /// This is called when the conversation gets too large.
 async fn summarize_conversation(session: &ConversationSession) -> Result<String> {
@@ -1171,6 +1209,39 @@ By following these guidelines and effectively using the provided tools, you can 
         if user_input.to_lowercase() == "/exit" {
             println!("{}", "Goodbye!".green());
             break;
+        } else if user_input.to_lowercase().starts_with("/forget ") {
+            // Extract what to forget
+            let to_forget = user_input[8..].trim();
+            if to_forget.is_empty() {
+                println!("{}", "Please specify what to forget".red());
+                continue;
+            }
+            
+            match forget_conversation(&session, to_forget).await {
+                Ok(summary) => {
+                    // Keep only the system message and summary
+                    let system_msg = session.messages.iter()
+                        .find(|m| matches!(m, Message::System(_)))
+                        .cloned()
+                        .unwrap_or(Message::System(preamble.to_string()));
+                    
+                    session.messages = vec![
+                        system_msg,
+                        Message::Assistant(format!("(Conversation Summary - Forgot '{}')\n{}", to_forget, summary))
+                    ];
+                    
+                    // Clear variables and long_context
+                    session.variables.clear();
+                    session.long_context = Value::Object(serde_json::Map::new());
+                    
+                    println!("{} {}", "Conversation updated to forget:".green(), to_forget);
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("{}: {}", "Error forgetting conversation".red(), e);
+                    continue;
+                }
+            }
         } else if user_input.to_lowercase() == "/clear" {
             // Summarize and reset the conversation
             match summarize_conversation(&session).await {
