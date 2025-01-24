@@ -90,12 +90,27 @@ impl ConversationSession {
 /// <scrape url>https://example.com</scrape url>
 #[derive(Debug)]
 pub enum ToolCall {
-    Search(String),
-    Bash(String),
-    Scrape(String),
-    GetVar(String),      // <get var>name</get var>
-    SetVar(String),      // <set var>name=value</set var>
-    ListVars,            // <list vars/>
+    Search {
+        query: String,
+        count: Option<u8>,
+        safe_search: Option<bool>
+    },
+    Bash {
+        command: String,
+        args: Vec<String>
+    },
+    Scrape {
+        url: String,
+        render_js: Option<bool>
+    },
+    GetVar {
+        name: String
+    },
+    SetVar {
+        name: String,
+        value: String
+    },
+    ListVars
 }
 
 //
@@ -143,7 +158,7 @@ async fn run_bash_command(command: &str) -> Result<String> {
 }
 
 // -- 2.2 Search Tool (using the Brave Search snippet you provided, but simplified)
-async fn run_search(query: &str) -> Result<String> {
+async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -> Result<String> {
     // For demonstration, we’ll do a simple GET to Brave Search API or
     // you can replace it with a mock or actual logic.
     //
@@ -159,7 +174,14 @@ async fn run_search(query: &str) -> Result<String> {
     let url = "https://api.search.brave.com/res/v1/web/search";
 
     // Basic parameters
-    let params = [("q", query), ("count", "5"), ("safesearch", "moderate")];
+    let count = count.unwrap_or(5);
+    let safe = safe_search.unwrap_or(true);
+    let safesearch = if safe { "strict" } else { "off" };
+    let params = [
+        ("q", query),
+        ("count", &count.to_string()),
+        ("safesearch", safesearch)
+    ];
 
     // Build the request
     let mut headers = reqwest::header::HeaderMap::new();
@@ -203,7 +225,7 @@ async fn run_search(query: &str) -> Result<String> {
 }
 
 // -- 2.3 Scrape Tool (using simplified ScrapingBee logic)
-async fn run_scrape(url: &str) -> Result<String> {
+async fn run_scrape(url: &str, render_js: bool) -> Result<String> {
     // For real usage, put your ScrapingBee API key in SCRAPINGBEE_API_KEY
     let api_key = env::var("SCRAPINGBEE_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
@@ -220,7 +242,7 @@ async fn run_scrape(url: &str) -> Result<String> {
         .query(&[
             ("api_key", &api_key),
             ("url", &url.to_string()),
-            ("render_js", &"true".to_string()),
+            ("render_js", &render_js.to_string()),
         ])
         .send()
         .await?;
@@ -346,38 +368,51 @@ async fn call_deepseek_api(session: &ConversationSession) -> Result<String> {
 /// We do this in a naive, repeated way. Each match includes the entire snippet.
 fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
     let mut calls = Vec::new();
-
-    let re_search = Regex::new(r"(?s)<search>(.*?)</search>").unwrap();
+    
+    // Parse search tool calls
+    let re_search = Regex::new(r#"(?s)<search\s+query="([^"]+)"(?:\s+count="(\d+)"|\s+safe_search="(true|false)")*\s*/>"#).unwrap();
     for cap in re_search.captures_iter(assistant_text) {
         let query = cap[1].trim().to_string();
-        calls.push(ToolCall::Search(query));
+        let count = cap.get(2).and_then(|m| m.as_str().parse::<u8>().ok());
+        let safe_search = cap.get(3).and_then(|m| m.as_str().parse::<bool>().ok());
+        calls.push(ToolCall::Search { query, count, safe_search });
     }
 
-    let re_bash = Regex::new(r"(?s)<bash>([^<]*)</bash>").unwrap();
+    // Parse bash tool calls
+    let re_bash = Regex::new(r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]+)")*\s*/>"#).unwrap();
     for cap in re_bash.captures_iter(assistant_text) {
-        let cmd = cap[1].trim().to_string();
-        calls.push(ToolCall::Bash(cmd));
+        let command = cap[1].trim().to_string();
+        let args = cap.get(2)
+            .map(|m| m.as_str().split_whitespace().map(|s| s.to_string()).collect())
+            .unwrap_or_else(Vec::new);
+        calls.push(ToolCall::Bash { command, args });
     }
 
-    let re_scrape = Regex::new(r"(?s)<scrape url>(.*?)</scrape url>").unwrap();
+    // Parse scrape tool calls
+    let re_scrape = Regex::new(r#"(?s)<scrape\s+url="([^"]+)"(?:\s+render_js="(true|false)")*\s*/>"#).unwrap();
     for cap in re_scrape.captures_iter(assistant_text) {
         let url = cap[1].trim().to_string();
-        calls.push(ToolCall::Scrape(url));
+        let render_js = cap.get(2).and_then(|m| m.as_str().parse::<bool>().ok());
+        calls.push(ToolCall::Scrape { url, render_js });
     }
 
-    let re_get_var = Regex::new(r"(?s)<get var>(.*?)</get var>").unwrap();
+    // Parse get var tool calls
+    let re_get_var = Regex::new(r#"(?s)<get_var\s+name="([^"]+)"\s*/>"#).unwrap();
     for cap in re_get_var.captures_iter(assistant_text) {
-        let var_name = cap[1].trim().to_string();
-        calls.push(ToolCall::GetVar(var_name));
+        let name = cap[1].trim().to_string();
+        calls.push(ToolCall::GetVar { name });
     }
 
-    let re_set_var = Regex::new(r"(?s)<set var>(.*?)</set var>").unwrap();
+    // Parse set var tool calls
+    let re_set_var = Regex::new(r#"(?s)<set_var\s+name="([^"]+)"\s+value="([^"]+)"\s*/>"#).unwrap();
     for cap in re_set_var.captures_iter(assistant_text) {
-        let var_expr = cap[1].trim().to_string();
-        calls.push(ToolCall::SetVar(var_expr));
+        let name = cap[1].trim().to_string();
+        let value = cap[2].trim().to_string();
+        calls.push(ToolCall::SetVar { name, value });
     }
 
-    let re_list_vars = Regex::new(r"(?s)<list vars/>").unwrap();
+    // Parse list vars tool calls
+    let re_list_vars = Regex::new(r"(?s)<list_vars\s*/>").unwrap();
     if re_list_vars.is_match(assistant_text) {
         calls.push(ToolCall::ListVars);
     }
@@ -578,16 +613,16 @@ async fn main() -> Result<()> {
 
 You have access to the following **essential tools**:
 
-* `<search>query</search>`: **YOU MUST USE THIS TOOL WHENEVER THE USER ASKS A QUESTION THAT REQUIRES INFORMATION FROM THE INTERNET, CURRENT EVENTS, FACTS, OR SPECIFIC WEB CONTENT.**  Do not answer from your internal knowledge if a search could provide a better or more current answer.  **You are explicitly designed to search the internet when needed.**  Do not say you "cannot search the internet"; you CAN and MUST use the `<search>` tool.
+* `<search query="query" [count="5"] [safe_search="true"] />`: **YOU MUST USE THIS TOOL WHENEVER THE USER ASKS A QUESTION THAT REQUIRES INFORMATION FROM THE INTERNET, CURRENT EVENTS, FACTS, OR SPECIFIC WEB CONTENT.** Example: `<search query="current weather in Paris" count="3" safe_search="true" />`
 
-* `<bash>command</bash>`: Use this tool to execute safe bash commands for system-related tasks. **Use this tool if the user explicitly asks for system information or to perform a command.** Be extremely careful with security and only execute safe commands.
+* `<bash command="command" [args="arg1 arg2"] />`: Use this tool to execute safe bash commands for system-related tasks. Example: `<bash command="ls" args="-l -a" />`
 
-* `<scrape url>URL</scrape url>`: Use this tool to get the text content of webpages. **USE THIS TOOL IF A SEARCH RESULT POINTS TO A RELEVANT WEBPAGE OR IF THE USER ASKS FOR INFORMATION LIKELY CONTAINED ON A SPECIFIC WEBSITE.**
+* `<scrape url="URL" [render_js="true"] />`: Use this tool to get the text content of webpages. Example: `<scrape url="https://example.com" render_js="true" />`
 
 * **Variable Tools:**
-  - `<set var>name=value</set var>`: Store important information for later use. Example: `<set var>target_ip=192.168.1.100</set var>`
-  - `<get var>name</get var>`: Retrieve a stored variable. Example: `<get var>target_ip</get var>`
-  - `<list vars/>`: List all stored variables and their values
+  - `<set_var name="name" value="value" />`: Store important information for later use. Example: `<set_var name="target_ip" value="192.168.1.100" />`
+  - `<get_var name="name" />`: Retrieve a stored variable. Example: `<get_var name="target_ip" />`
+  - `<list_vars />`: List all stored variables and their values
 
 **YOUR OPERATING PROCEDURE IS AS FOLLOWS:**
 
@@ -689,18 +724,19 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
         let mut tool_results_text = String::new();
         for call in tool_calls {
             match call {
-                ToolCall::Search(q) => {
-                    let result = match run_search(&q).await {
+                ToolCall::Search { query, count, safe_search } => {
+                    let result = match run_search(&query, count, safe_search).await {
                         Ok(r) => r,
                         Err(e) => format!("ERROR during search: {}", e),
                     };
                     tool_results_text.push_str(&format!(
                         "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                        q, result
+                        query, result
                     ));
                 }
-                ToolCall::Bash(cmd) => {
-                    let result = match run_bash_command(&cmd).await {
+                ToolCall::Bash { command, args } => {
+                    let full_cmd = format!("{} {}", command, args.join(" "));
+                    let result = match run_bash_command(&full_cmd).await {
                         Ok(r) => r,
                         Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
                     };
@@ -710,8 +746,8 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
                         result
                     ));
                 }
-                ToolCall::Scrape(url) => {
-                    let result = match run_scrape(&url).await {
+                ToolCall::Scrape { url, render_js } => {
+                    let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
                         Ok(r) => r,
                         Err(e) => format!("ERROR during scrape: {}", e),
                     };
@@ -720,31 +756,22 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
                         url, result
                     ));
                 }
-                ToolCall::GetVar(var_name) => {
-                    let result = match session.get_var(&var_name) {
-                        Some(value) => format!("Variable '{}': {}", var_name, value),
-                        None => format!("Variable '{}' not found", var_name),
+                ToolCall::GetVar { name } => {
+                    let result = match session.get_var(&name) {
+                        Some(value) => format!("Variable '{}': {}", name, value),
+                        None => format!("Variable '{}' not found", name),
                     };
                     tool_results_text.push_str(&format!(
                         "==== [GET VAR result] ====\n{}\n\n",
                         result
                     ));
                 }
-                ToolCall::SetVar(var_expr) => {
-                    let parts: Vec<&str> = var_expr.splitn(2, '=').collect();
-                    if parts.len() == 2 {
-                        let var_name = parts[0].trim().to_string();
-                        let var_value = parts[1].trim().to_string();
-                        session.set_var(var_name.clone(), var_value.clone());
-                        tool_results_text.push_str(&format!(
-                            "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
-                            var_name, var_value
-                        ));
-                    } else {
-                        tool_results_text.push_str(&format!(
-                            "==== [SET VAR ERROR] ====\nInvalid format. Use: <set var>name=value</set var>\n\n"
-                        ));
-                    }
+                ToolCall::SetVar { name, value } => {
+                    session.set_var(name.clone(), value.clone());
+                    tool_results_text.push_str(&format!(
+                        "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
+                        name, value
+                    ));
                 }
                 ToolCall::ListVars => {
                     let result = session.list_vars();
