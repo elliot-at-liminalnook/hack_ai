@@ -46,6 +46,105 @@ pub enum Message {
     Assistant(String),
 }
 
+const MAX_ITERATIONS: usize = 10; // Maximum number of automatic follow-ups
+
+/// Process tool calls and continue until completion or max iterations
+async fn process_tool_calls(session: &mut ConversationSession, initial_response: String) -> Result<String> {
+    let mut current_response = initial_response;
+    let mut iteration = 0;
+    
+    loop {
+        iteration += 1;
+        if iteration > MAX_ITERATIONS {
+            return Ok(format!("{}: Reached maximum number of iterations ({})", 
+                "STOPPED".red().bold(), 
+                MAX_ITERATIONS
+            ));
+        }
+
+        // Check for completion condition
+        if current_response.contains("<done/>") {
+            return Ok(current_response.replace("<done/>", "").trim().to_string());
+        }
+
+        // Parse and execute tool calls
+        let tool_calls = parse_tool_calls(&current_response);
+        if tool_calls.is_empty() {
+            return Ok(current_response);
+        }
+
+        let mut tool_results_text = String::new();
+        for call in tool_calls {
+            match call {
+                ToolCall::Search { query, count, safe_search } => {
+                    let result = match run_search(&query, count, safe_search).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during search: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
+                        query, result
+                    ));
+                }
+                ToolCall::Bash { command, args } => {
+                    let full_cmd = format!("{} {}", command, args.join(" "));
+                    let result = match run_bash_command(&full_cmd).await {
+                        Ok(r) => r,
+                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "\n{}\n{}\n",
+                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                        result
+                    ));
+                }
+                ToolCall::Scrape { url, render_js } => {
+                    let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
+                        Ok(r) => r,
+                        Err(e) => format!("ERROR during scrape: {}", e),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
+                        url, result
+                    ));
+                }
+                ToolCall::GetVar { name } => {
+                    let result = match session.get_var(&name) {
+                        Some(value) => format!("Variable '{}': {}", name, value),
+                        None => format!("Variable '{}' not found", name),
+                    };
+                    tool_results_text.push_str(&format!(
+                        "==== [GET VAR result] ====\n{}\n\n",
+                        result
+                    ));
+                }
+                ToolCall::SetVar { name, value } => {
+                    session.set_var(name.clone(), value.clone());
+                    tool_results_text.push_str(&format!(
+                        "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
+                        name, value
+                    ));
+                }
+                ToolCall::ListVars => {
+                    let result = session.list_vars();
+                    tool_results_text.push_str(&format!(
+                        "==== [LIST VARS result] ====\n{}\n\n",
+                        result
+                    ));
+                }
+            }
+        }
+
+        // Add tool results to conversation
+        let tool_msg = format!("Tool results:\n{}", tool_results_text);
+        session.messages.push(Message::Assistant(tool_msg.clone()));
+
+        // Get next response from LLM
+        let next_response = timeout(Duration::from_secs(30), call_deepseek_api(session)).await??;
+        current_response = next_response;
+    }
+}
+
 /// The entire conversation session, which we store in JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSession {
