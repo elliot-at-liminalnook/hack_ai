@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -347,8 +348,12 @@ fn save_session(session: &ConversationSession) -> Result<()> {
 /// Load an existing session from `session.json`, if it exists.
 fn load_session() -> ConversationSession {
     let path = PathBuf::from("session.json");
+    load_session_from_path(&path)
+}
+
+fn load_session_from_path(path: &PathBuf) -> ConversationSession {
     if path.exists() {
-        match File::open(&path) {
+        match File::open(path) {
             Ok(file) => {
                 if let Ok(sess) = serde_json::from_reader(file) {
                     return sess;
@@ -362,11 +367,117 @@ fn load_session() -> ConversationSession {
 
 //
 // -----------------------------------------------------------------------------
-// 6. Main CLI Loop
+// 6. Test Mode - Run a session file and show results
 // -----------------------------------------------------------------------------
+
+/// Run a session file in test mode - process all messages and show results
+async fn run_test_session(session_path: &str) -> Result<()> {
+    let path = PathBuf::from(session_path);
+    let session = load_session_from_path(&path);
+    
+    // Process each user message in sequence
+    for msg in &session.messages {
+        if let Message::User(user_input) = msg {
+            println!("{} {}", "[User]".green().bold(), user_input);
+            
+            // Call the LLM
+            let result = timeout(Duration::from_secs(30), call_deepseek_api(&session)).await;
+            let assistant_response = match result {
+                Ok(Ok(content)) => content,
+                Ok(Err(e)) => {
+                    eprintln!("{}: {}", "[Error from LLM]".red(), e.to_string());
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!("{}", "[Timed out waiting for LLM]".red());
+                    continue;
+                }
+            };
+
+            // Parse and run tool calls
+            let tool_calls = parse_tool_calls(&assistant_response);
+            let mut tool_results_text = String::new();
+            for call in tool_calls {
+                match call {
+                    ToolCall::Search(q) => {
+                        let result = match run_search(&q).await {
+                            Ok(r) => r,
+                            Err(e) => format!("ERROR during search: {}", e),
+                        };
+                        tool_results_text.push_str(&format!(
+                            "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
+                            q, result
+                        ));
+                    }
+                    ToolCall::Bash(cmd) => {
+                        let result = match run_bash_command(&cmd).await {
+                            Ok(r) => r,
+                            Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                        };
+                        tool_results_text.push_str(&format!(
+                            "\n{}\n{}\n",
+                            "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                            result
+                        ));
+                    }
+                    ToolCall::Scrape(url) => {
+                        let result = match run_scrape(&url).await {
+                            Ok(r) => r,
+                            Err(e) => format!("ERROR during scrape: {}", e),
+                        };
+                        tool_results_text.push_str(&format!(
+                            "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
+                            url, result
+                        ));
+                    }
+                }
+            }
+
+            // Show assistant response and tool results
+            let display_text = &assistant_response.trim().to_string();
+            if !display_text.is_empty() {
+                println!(
+                    "{} {}",
+                    "[Assistant]".blue().bold(),
+                    display_text
+                );
+            }
+            
+            if !tool_results_text.is_empty() {
+                println!(
+                    "{} {}",
+                    "[Tool Results]".yellow().bold(),
+                    tool_results_text
+                );
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+//
+// -----------------------------------------------------------------------------
+// 7. Main CLI Loop
+// -----------------------------------------------------------------------------
+
+/// CLI arguments
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Path to session file to run in test mode
+    #[arg(short, long)]
+    test_session: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    // If test mode specified, run that instead of interactive mode
+    if let Some(session_path) = args.test_session {
+        return run_test_session(&session_path).await;
+    }
 
 
     let preamble = r#"You are an EXPERT AI ASSISTANT whose PRIMARY FUNCTION is to use tools to answer user questions.  You are **required** to use tools whenever they can provide a more accurate, up-to-date, or comprehensive answer than your internal knowledge.
