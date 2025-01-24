@@ -309,7 +309,7 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
         calls.push(ToolCall::Search(query));
     }
 
-    let re_bash = Regex::new(r"(?s)<bash>(.*?)</bash>").unwrap();
+    let re_bash = Regex::new(r"(?s)<bash>([^<]*)</bash>").unwrap();
     for cap in re_bash.captures_iter(assistant_text) {
         let cmd = cap[1].trim().to_string();
         calls.push(ToolCall::Bash(cmd));
