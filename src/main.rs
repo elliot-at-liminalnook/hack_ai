@@ -586,6 +586,7 @@ async fn call_deepseek_api(
     }
 
     Err(anyhow!("No valid content in DeepSeek API response"))
+    }).await
 }
 
 //
