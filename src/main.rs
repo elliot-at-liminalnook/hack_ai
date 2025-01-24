@@ -226,7 +226,7 @@ async fn summarize_tool_output(text: &str) -> Result<String> {
     summary_sess.messages.push(Message::User(text.to_string()));
 
     // We reuse the normal deepseek-chat for summarizing tool outputs
-    let summary = call_deepseek_api(&summary_sess, "deepseek-chat").await?;
+    let summary = call_deepseek_api(&mut summary_sess, "deepseek-chat").await?;
     Ok(summary.trim().to_string())
 }
 
@@ -486,6 +486,8 @@ async fn call_deepseek_api(
     session: &mut ConversationSession,
     model_name: &str,
 ) -> Result<String> {
+    // Box the future to handle recursion
+    Box::pin(async move {
 
     // If conversation is too large, summarize and reduce it
     if estimate_conversation_size(&session) > CONVERSATION_CHAR_LIMIT {
