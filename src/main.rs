@@ -77,20 +77,39 @@ pub enum ToolCall {
 
 // -- 2.1 Bash Tool
 async fn run_bash_command(command: &str) -> Result<String> {
-    // A very naive implementation (blocking). For real usage, we might do more robust logic:
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()?;
+    // Validate command for safety
+    let forbidden_commands = ["rm", "mv", "dd", "shutdown", "reboot", "kill"];
+    if forbidden_commands.iter().any(|&cmd| command.contains(cmd)) {
+        return Err(anyhow!("Command contains forbidden operation: {}", command));
+    }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // Run command with timeout
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .output(),
+    )
+    .await??;
+
+    // Format output more cleanly
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let code = output.status.code().unwrap_or(-1);
 
-    let result = format!(
-        "Bash Command: {}\nExit Code: {}\nStdout:\n{}\nStderr:\n{}",
-        command, code, stdout, stderr
-    );
+    let mut result = String::new();
+    result.push_str(&format!("Command: {}\n", command.green().bold()));
+    result.push_str(&format!("Exit Code: {}\n", code));
+
+    if !stdout.is_empty() {
+        result.push_str(&format!("\n{}:\n{}\n", "STDOUT".blue().bold(), stdout));
+    }
+
+    if !stderr.is_empty() {
+        result.push_str(&format!("\n{}:\n{}", "STDERR".red().bold(), stderr));
+    }
+
     Ok(result)
 }
 
@@ -462,11 +481,12 @@ Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
                 ToolCall::Bash(cmd) => {
                     let result = match run_bash_command(&cmd).await {
                         Ok(r) => r,
-                        Err(e) => format!("ERROR during bash: {}", e),
+                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
                     };
                     tool_results_text.push_str(&format!(
-                        "==== [BASH result for \"{}\"] ====\n{}\n\n",
-                        cmd, result
+                        "\n{}\n{}\n",
+                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                        result
                     ));
                 }
                 ToolCall::Scrape(url) => {
