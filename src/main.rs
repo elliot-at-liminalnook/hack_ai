@@ -533,8 +533,9 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             query, result
                         ));
                     }
-                    ToolCall::Bash(cmd) => {
-                        let result = match run_bash_command(&cmd).await {
+                    ToolCall::Bash { command, args } => {
+                        let full_cmd = format!("{} {}", command, args.join(" "));
+                        let result = match run_bash_command(&full_cmd).await {
                             Ok(r) => r,
                             Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
                         };
