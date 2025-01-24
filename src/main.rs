@@ -495,14 +495,14 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             let mut tool_results_text = String::new();
             for call in tool_calls {
                 match call {
-                    ToolCall::Search(q) => {
-                        let result = match run_search(&q).await {
+                    ToolCall::Search { query, count, safe_search } => {
+                        let result = match run_search(&query, count, safe_search).await {
                             Ok(r) => r,
                             Err(e) => format!("ERROR during search: {}", e),
                         };
                         tool_results_text.push_str(&format!(
                             "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                            q, result
+                            query, result
                         ));
                     }
                     ToolCall::Bash(cmd) => {
