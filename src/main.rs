@@ -149,12 +149,28 @@ async fn run_search(query: &str) -> Result<String> {
         return Err(anyhow!("Brave Search error: {text}"));
     }
 
-    // We’ll just return raw JSON
-    let json_response = resp.text().await?;
-    let result = format!(
-        "Search Query: {}\nBrave Search Results:\n{}",
-        query, json_response
-    );
+    // Parse JSON and extract relevant info
+    let json_response: Value = resp.json().await?;
+    let mut result = String::new();
+    result.push_str(&format!("Search Query: {}\n\n", query));
+
+    if let Some(web_results) = json_response.get("web").and_then(|w| w.get("results")) {
+        if let Some(results) = web_results.as_array() {
+            for (i, item) in results.iter().enumerate() {
+                if i >= 5 { break; } // Limit to top 5 results
+                
+                if let (Some(url), Some(desc)) = (item.get("url"), item.get("description")) {
+                    if let (Some(url_str), Some(desc_str)) = (url.as_str(), desc.as_str()) {
+                        result.push_str(&format!("• {}: {}\n\n", 
+                            url_str.blue().underline(),
+                            desc_str
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(result)
 }
 
