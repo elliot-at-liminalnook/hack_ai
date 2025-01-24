@@ -50,7 +50,7 @@ pub enum Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSession {
     pub messages: Vec<Message>,
-    pub variables: std::collections::HashMap<String, String>,
+    pub variables: std::collections::HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
 }
 
 impl ConversationSession {
@@ -63,21 +63,49 @@ impl ConversationSession {
 
     /// Get a variable value by key
     pub fn get_var(&self, key: &str) -> Option<&String> {
-        self.variables.get(key)
+        self.variables.get(key).map(|(value, _)| value)
     }
 
-    /// Set a variable value
+    /// Set a variable value with timestamp
     pub fn set_var(&mut self, key: String, value: String) {
-        self.variables.insert(key, value);
+        let now = chrono::Utc::now();
+        self.variables.insert(key, (value, now));
     }
 
-    /// List all variables
+    /// List all variables with timestamps
     pub fn list_vars(&self) -> String {
         if self.variables.is_empty() {
             return "No variables stored".to_string();
         }
-        self.variables.iter()
-            .map(|(k, v)| format!("{}: {}", k, v))
+        
+        // Sort by timestamp (newest first)
+        let mut vars: Vec<_> = self.variables.iter()
+            .map(|(k, (v, t))| (t, k, v))
+            .collect();
+        vars.sort_by(|a, b| b.0.cmp(a.0));
+        
+        vars.iter()
+            .map(|(t, k, v)| format!("{}: {} (set at {})", k, v, t.format("%Y-%m-%d %H:%M:%S")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Get the 10 most recent variables for context
+    pub fn recent_vars(&self) -> String {
+        if self.variables.is_empty() {
+            return String::new();
+        }
+        
+        // Sort by timestamp (newest first)
+        let mut vars: Vec<_> = self.variables.iter()
+            .map(|(k, (v, t))| (t, k, v))
+            .collect();
+        vars.sort_by(|a, b| b.0.cmp(a.0));
+        
+        // Take top 10
+        vars.iter()
+            .take(10)
+            .map(|(t, k, v)| format!("{}: {} (set at {})", k, v, t.format("%Y-%m-%d %H:%M:%S")))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -690,9 +718,18 @@ Assistant: `<get var>target_ip</get var>` **<-- CORRECT - RETRIEVING STORED INFO
             break;
         }
 
-        // 1) Add the user’s message to the conversation and show it
+        // 1) Add recent variables context to user message
+        let recent_vars = session.recent_vars();
+        let full_user_message = if !recent_vars.is_empty() {
+            format!("Recent variables for reference:\n{}\n\nUser message: {}", 
+                recent_vars, user_input)
+        } else {
+            user_input.clone()
+        };
+
+        // 2) Add the user’s message to the conversation and show it
         println!("{} {}", "[User]".green().bold(), user_input);
-        session.messages.push(Message::User(user_input.clone()));
+        session.messages.push(Message::User(full_user_message));
 
         // 2) Call the LLM
         // (with a simple timeout to avoid indefinite hang - 30s for demo)
