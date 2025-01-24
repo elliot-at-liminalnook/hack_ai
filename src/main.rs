@@ -704,8 +704,6 @@ pub async fn process_tool_calls(
         }
 
         let mut tool_results_text = String::new();
-        // Show assistant message first
-        println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
         
         for call in tool_calls {
             match call {
@@ -1357,9 +1355,16 @@ By following these guidelines and effectively using the provided tools, you can 
         let final_response = assistant_response.clone();
         session.messages.push(Message::Assistant(final_response.clone()));
 
-        // Display final response
+        // Display assistant response and tool results
         if !final_response.is_empty() {
             println!("{} {}", "[Assistant]".blue().bold(), final_response);
+        }
+        if !tool_results_text.is_empty() {
+            println!(
+                "{} {}",
+                "[Tool Results]".yellow().bold(),
+                tool_results_text
+            );
         }
 
         // Save session
