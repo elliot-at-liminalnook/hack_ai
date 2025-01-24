@@ -335,43 +335,94 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
 
 // -- Scrape Tool
 async fn run_scrape(url: &str, render_js: bool) -> Result<String> {
+    tracing::debug!("Starting scrape of URL: {}", url);
+    
     // For real usage, put your ScrapingBee API key in SCRAPINGBEE_API_KEY
     let api_key = env::var("SCRAPINGBEE_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
+        tracing::warn!("No SCRAPINGBEE_API_KEY found - scraping disabled");
         return Ok("No SCRAPINGBEE_API_KEY found. Provide one to enable real scraping.".to_string());
     }
 
+    tracing::debug!("Initializing HTTP client");
     let client = reqwest::Client::new();
     let base_url = "https://app.scrapingbee.com/api/v1/";
 
-    let resp = client
+    tracing::debug!("Building request with params: render_js={}", render_js);
+    let request = client
         .get(base_url)
         .query(&[
             ("api_key", &api_key),
             ("url", &url.to_string()),
             ("render_js", &render_js.to_string()),
-        ])
-        .send()
-        .await?;
+        ]);
+
+    tracing::debug!("Sending request to ScrapingBee API");
+    let resp = match request.send().await {
+        Ok(r) => {
+            tracing::debug!("Received response with status: {}", r.status());
+            r
+        }
+        Err(e) => {
+            tracing::error!("Request failed: {}", e);
+            return Err(anyhow!("Request failed: {}", e));
+        }
+    };
 
     if !resp.status().is_success() {
-        let text = resp.text().await?;
+        tracing::warn!("Non-success status: {}", resp.status());
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Failed to read error response text: {}", e);
+                return Err(anyhow!("ScrapingBee error: {}", e));
+            }
+        };
+        tracing::debug!("Error response text: {}", text);
         return Err(anyhow!("ScrapingBee error: {text}"));
     }
 
+    tracing::debug!("Checking content type");
     let content_type = resp
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
+    tracing::debug!("Content type: {}", content_type);
+
     if content_type.contains("text") || content_type.contains("json") {
-        let text = resp.text().await?;
+        tracing::debug!("Processing text response");
+        let text = match resp.text().await {
+            Ok(t) => {
+                tracing::debug!("Received text response of length: {}", t.len());
+                t
+            }
+            Err(e) => {
+                tracing::error!("Failed to read response text: {}", e);
+                return Err(anyhow!("Failed to read response: {}", e));
+            }
+        };
+
+        tracing::debug!("Extracting text from HTML");
         let readable_text = extract_text_from_html(&text, Some(url));
+        tracing::debug!("Extracted text length: {}", readable_text.len());
+
         let result = format!("Scraped URL: {}\nExtracted Text:\n{}", url, readable_text);
         Ok(result)
     } else {
-        let bytes = resp.bytes().await?;
+        tracing::debug!("Processing binary response");
+        let bytes = match resp.bytes().await {
+            Ok(b) => {
+                tracing::debug!("Received binary response of length: {}", b.len());
+                b
+            }
+            Err(e) => {
+                tracing::error!("Failed to read response bytes: {}", e);
+                return Err(anyhow!("Failed to read binary response: {}", e));
+            }
+        };
+
         let result = format!(
             "Scraped URL: {}\nReceived {} bytes of binary data.",
             url,
