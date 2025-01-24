@@ -550,7 +550,8 @@ Assistant: `<bash>ls ~</bash>` **<-- CORRECT - TOOL USED**
             break;
         }
 
-        // 1) Add the user’s message to the conversation
+        // 1) Add the user’s message to the conversation and show it
+        println!("{} {}", "[User]".green().bold(), user_input);
         session.messages.push(Message::User(user_input.clone()));
 
         // 2) Call the LLM
