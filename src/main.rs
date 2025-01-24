@@ -497,7 +497,7 @@ fn load_session_from_path(path: &PathBuf) -> ConversationSession {
 /// Run a session file in test mode - process all messages and show results
 async fn run_test_session(session_path: &str) -> Result<()> {
     let path = PathBuf::from(session_path);
-    let session = load_session_from_path(&path);
+    let mut session = load_session_from_path(&path);
     
     // Process each user message in sequence
     for msg in &session.messages {
