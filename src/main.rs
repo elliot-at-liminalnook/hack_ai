@@ -516,8 +516,8 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             result
                         ));
                     }
-                    ToolCall::Scrape(url) => {
-                        let result = match run_scrape(&url).await {
+                    ToolCall::Scrape { url, render_js } => {
+                        let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
                             Ok(r) => r,
                             Err(e) => format!("ERROR during scrape: {}", e),
                         };
