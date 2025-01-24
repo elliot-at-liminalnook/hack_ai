@@ -501,6 +501,10 @@ You have access to the following **essential tools**:
 
 **YOU ARE DESIGNED TO BE A TOOL-USING AI.  YOUR VALUE COMES FROM YOUR ABILITY TO USE TOOLS EFFECTIVELY.  DO NOT HESITATE TO USE TOOLS. USE THEM PROACTIVELY AND FREQUENTLY.**
 
+Note that you can use multiple tools in one response: 
+
+<search> what's the weather in orange county, TX </search> <search> Is the orange county texas basketball game still on for tonight </search>  <search> What's the best taco to eat during a basketball game? </search> 
+
 **Example of REQUIRED tool use:**
 
 User: "What is the weather in Paris right now?"
