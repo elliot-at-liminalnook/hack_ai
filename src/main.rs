@@ -866,108 +866,104 @@ struct DeepSeekMessage {
 /// We'll do that by calling `summarize_conversation` with the "deepseek-reasoner" model
 /// and replacing older messages with a summary message (keeping the original system message).
 async fn call_deepseek_api(session: &mut ConversationSession, model_name: &str) -> Result<String> {
-    // Box the future to handle recursion
-    Box::pin(async move {
-        // If conversation is too large, summarize and reduce it
-        if estimate_conversation_size(&session) > CONVERSATION_CHAR_LIMIT {
-            // Summarize the conversation so far
-            let summary = summarize_conversation(session).await?;
-            // Replace older messages with the system message + summary
-            let original_system_msg = session
-                .messages
-                .iter()
-                .find(|m| matches!(m, Message::System(_)))
-                .cloned()
-                .unwrap_or(Message::System(
-                    "You are an EXPERT AI ASSISTANT".to_string(),
-                ));
+    // If conversation is too large, summarize and reduce it
+    if estimate_conversation_size(&session) > CONVERSATION_CHAR_LIMIT {
+        // Summarize the conversation so far
+        let summary = summarize_conversation(session).await?;
+        // Replace older messages with the system message + summary
+        let original_system_msg = session
+            .messages
+            .iter()
+            .find(|m| matches!(m, Message::System(_)))
+            .cloned()
+            .unwrap_or(Message::System(
+                "You are an EXPERT AI ASSISTANT".to_string(),
+            ));
 
-            // We'll keep only the system message + a new "assistant" summary +
-            // the last user message if there's one (so we keep the context of the user's question).
-            let last_user_message = session
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m, Message::User(_)))
-                .cloned();
+        // We'll keep only the system message + a new "assistant" summary +
+        // the last user message if there's one (so we keep the context of the user's question).
+        let last_user_message = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m, Message::User(_)))
+            .cloned();
 
-            session.messages.clear();
-            // Keep the original system message
-            session.messages.push(original_system_msg);
+        session.messages.clear();
+        // Keep the original system message
+        session.messages.push(original_system_msg);
 
-            // Keep the summary as an "assistant" message
-            session.messages.push(Message::Assistant(format!(
-                "(Conversation Summary)\n{}",
-                summary
-            )));
+        // Keep the summary as an "assistant" message
+        session.messages.push(Message::Assistant(format!(
+            "(Conversation Summary)\n{}",
+            summary
+        )));
 
-            // Keep the last user message (if any) so the conversation makes sense
-            if let Some(user_msg) = last_user_message {
-                session.messages.push(user_msg);
-            }
+        // Keep the last user message (if any) so the conversation makes sense
+        if let Some(user_msg) = last_user_message {
+            session.messages.push(user_msg);
         }
+    }
 
-        // Convert session messages -> DeepSeekMessage
-        let mut ds_messages = Vec::new();
-        for msg in &session.messages {
-            match msg {
-                Message::System(txt) => ds_messages.push(DeepSeekMessage {
-                    role: "system".into(),
-                    content: txt.clone(),
-                }),
-                Message::User(txt) => ds_messages.push(DeepSeekMessage {
-                    role: "user".into(),
-                    content: txt.clone(),
-                }),
-                Message::Assistant(txt) => ds_messages.push(DeepSeekMessage {
-                    role: "assistant".into(),
-                    content: txt.clone(),
-                }),
-            }
+    // Convert session messages -> DeepSeekMessage
+    let mut ds_messages = Vec::new();
+    for msg in &session.messages {
+        match msg {
+            Message::System(txt) => ds_messages.push(DeepSeekMessage {
+                role: "system".into(),
+                content: txt.clone(),
+            }),
+            Message::User(txt) => ds_messages.push(DeepSeekMessage {
+                role: "user".into(),
+                content: txt.clone(),
+            }),
+            Message::Assistant(txt) => ds_messages.push(DeepSeekMessage {
+                role: "assistant".into(),
+                content: txt.clone(),
+            }),
         }
+    }
 
-        let req_body = DeepSeekChatRequest {
-            model: model_name.to_string(),
-            messages: ds_messages,
-            stream: false,
-            temperature: 0.7,
-        };
+    let req_body = DeepSeekChatRequest {
+        model: model_name.to_string(),
+        messages: ds_messages,
+        stream: false,
+        temperature: 0.7,
+    };
 
-        let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
-        if api_key.is_empty() {
-            error!("Missing DEEPSEEK_API_KEY environment variable!");
-            return Err(anyhow!("DEEPSEEK_API_KEY not set"));
-        }
+    let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        error!("Missing DEEPSEEK_API_KEY environment variable!");
+        return Err(anyhow!("DEEPSEEK_API_KEY not set"));
+    }
 
-        let client = reqwest::Client::new();
-        let resp = client
-            .post("https://api.deepseek.com/chat/completions")
-            .bearer_auth(api_key)
-            .json(&req_body)
-            .send()
-            .await?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.deepseek.com/chat/completions")
+        .bearer_auth(api_key)
+        .json(&req_body)
+        .send()
+        .await?;
 
-        if !resp.status().is_success() {
-            let text = resp.text().await?;
-            return Err(anyhow!("DeepSeek API Error: {}", text));
-        }
+    if !resp.status().is_success() {
+        let text = resp.text().await?;
+        return Err(anyhow!("DeepSeek API Error: {}", text));
+    }
 
-        let json_resp: Value = resp.json().await?;
-        // Usually: { "choices": [ { "message": {"role":"assistant","content":"hello"} } ], ... }
-        if let Some(choices) = json_resp.get("choices") {
-            if let Some(first_choice) = choices.get(0) {
-                if let Some(msg) = first_choice.get("message") {
-                    if let Some(content) = msg.get("content") {
-                        let content_str = content.as_str().unwrap_or("").to_string();
-                        return Ok(content_str);
-                    }
+    let json_resp: Value = resp.json().await?;
+    // Usually: { "choices": [ { "message": {"role":"assistant","content":"hello"} } ], ... }
+    if let Some(choices) = json_resp.get("choices") {
+        if let Some(first_choice) = choices.get(0) {
+            if let Some(msg) = first_choice.get("message") {
+                if let Some(content) = msg.get("content") {
+                    let content_str = content.as_str().unwrap_or("").to_string();
+                    return Ok(content_str);
                 }
             }
         }
+    }
 
-        Err(anyhow!("No valid content in DeepSeek API response"))
-    })
-    .await
+    Err(anyhow!("No valid content in DeepSeek API response"))
 }
 
 //
