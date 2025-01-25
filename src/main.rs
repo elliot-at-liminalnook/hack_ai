@@ -1404,6 +1404,131 @@ struct Args {
     test_session: Option<String>,
 }
 
+/// Result of handling a special command
+#[derive(PartialEq)]
+enum CommandResult {
+    Break,     // Should break main loop
+    Continue,  // Should continue to next iteration
+    Proceed,   // Should proceed with normal processing
+}
+
+/// Handle special commands like /exit, /remember, etc.
+async fn handle_special_command(user_input: &str, session: &mut ConversationSession, preamble: &str) -> CommandResult {
+    let input_lower = user_input.to_lowercase();
+    
+    if input_lower == "/exit" {
+        println!("{}", "Goodbye!".green());
+        CommandResult::Break
+    } else if input_lower.starts_with("/remember ") {
+        let memory = user_input[10..].trim();
+        if memory.is_empty() {
+            println!("{}", "Please provide something to remember".red());
+            return CommandResult::Continue;
+        }
+        
+        match append_to_memories(memory).await {
+            Ok(_) => println!("{}", "Added to memories.txt".green()),
+            Err(e) => eprintln!("{}: {}", "Error saving memory".red(), e),
+        }
+        CommandResult::Continue
+    } else if input_lower.starts_with("/forget ") {
+        let to_forget = user_input[8..].trim();
+        if to_forget.is_empty() {
+            println!("{}", "Please specify what to forget".red());
+            return CommandResult::Continue;
+        }
+
+        match forget_conversation(session, to_forget).await {
+            Ok(summary) => {
+                let system_msg = session
+                    .messages
+                    .iter()
+                    .find(|m| matches!(m, Message::System(_)))
+                    .cloned()
+                    .unwrap_or(Message::System(preamble.to_string()));
+
+                session.messages = vec![
+                    system_msg,
+                    Message::Assistant(format!(
+                        "(Conversation Summary - Forgot '{}')\n{}",
+                        to_forget, summary
+                    )),
+                ];
+                session.variables.clear();
+                println!("{} {}", "Conversation updated to forget:".green(), to_forget);
+            }
+            Err(e) => eprintln!("{}: {}", "Error forgetting conversation".red(), e),
+        }
+        CommandResult::Continue
+    } else if input_lower.starts_with("/think ") {
+        let to_think = user_input[7..].trim();
+        if to_think.is_empty() {
+            println!("{}", "Please specify what to think about".red());
+            return CommandResult::Continue;
+        }
+
+        let mut think_sess = session.clone();
+        let mut conversation_text = String::new();
+        for msg in &think_sess.messages {
+            match msg {
+                Message::System(txt) => conversation_text.push_str(&format!("[System]\n{}\n\n", txt)),
+                Message::User(txt) => conversation_text.push_str(&format!("[User]\n{}\n\n", txt)),
+                Message::Assistant(txt) => conversation_text.push_str(&format!("[Assistant]\n{}\n\n", txt)),
+            }
+        }
+
+        think_sess.messages.retain(|m| matches!(m, Message::System(_)));
+        think_sess.messages.push(Message::User(
+            format!("Analyze this conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.\n\nConversation:\n{}", to_think, conversation_text)
+        ));
+
+        match call_deepseek_api(&mut think_sess, "deepseek-reasoner").await {
+            Ok(response) => {
+                println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
+                session.messages.push(Message::Assistant(response));
+            }
+            Err(e) => {
+                eprintln!("{}: {}", "Error during deep thinking".red(), e);
+                session.messages.push(Message::Assistant(format!("Error during deep thinking: {}", e)));
+            }
+        }
+        CommandResult::Continue
+    } else if input_lower == "/clear" {
+        match summarize_conversation(session).await {
+            Ok(summary) => {
+                let system_msg = session
+                    .messages
+                    .iter()
+                    .find(|m| matches!(m, Message::System(_)))
+                    .cloned()
+                    .unwrap_or(Message::System(preamble.to_string()));
+
+                session.messages = vec![
+                    system_msg,
+                    Message::Assistant(format!("(Conversation Summary)\n{}", summary)),
+                ];
+                session.variables.clear();
+
+                match execute_setup_commands().await {
+                    Ok(output) => {
+                        if !output.is_empty() {
+                            session.messages.push(Message::Assistant(
+                                format!("Setup commands re-executed:\n{}", output)
+                            ));
+                        }
+                    }
+                    Err(e) => eprintln!("Error executing setup commands: {}", e),
+                }
+                println!("{}", "Conversation cleared and summarized.".green());
+            }
+            Err(e) => eprintln!("{}: {}", "Error summarizing conversation".red(), e),
+        }
+        CommandResult::Continue
+    } else {
+        CommandResult::Proceed
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -1571,159 +1696,11 @@ By following these guidelines and effectively using the provided tools, you can 
     for line in stdin.lock().lines() {
         let user_input = line?.trim().to_string();
 
-        if user_input.to_lowercase() == "/exit" {
-            println!("{}", "Goodbye!".green());
-            break;
-        } else if user_input.to_lowercase().starts_with("/remember ") {
-            let memory = user_input[10..].trim();
-            if memory.is_empty() {
-                println!("{}", "Please provide something to remember".red());
-                continue;
-            }
-            
-            match append_to_memories(memory).await {
-                Ok(_) => println!("{}", "Added to memories.txt".green()),
-                Err(e) => eprintln!("{}: {}", "Error saving memory".red(), e),
-            }
-            continue;
-        } else if user_input.to_lowercase().starts_with("/forget ") {
-            // Extract what to forget
-            let to_forget = user_input[8..].trim();
-            if to_forget.is_empty() {
-                println!("{}", "Please specify what to forget".red());
-                continue;
-            }
-
-            match forget_conversation(&session, to_forget).await {
-                Ok(summary) => {
-                    // Keep only the system message and summary
-                    let system_msg = session
-                        .messages
-                        .iter()
-                        .find(|m| matches!(m, Message::System(_)))
-                        .cloned()
-                        .unwrap_or(Message::System(preamble.to_string()));
-
-                    session.messages = vec![
-                        system_msg,
-                        Message::Assistant(format!(
-                            "(Conversation Summary - Forgot '{}')\n{}",
-                            to_forget, summary
-                        )),
-                    ];
-
-                    // Clear variables
-                    session.variables.clear();
-
-                    println!(
-                        "{} {}",
-                        "Conversation updated to forget:".green(),
-                        to_forget
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("{}: {}", "Error forgetting conversation".red(), e);
-                    continue;
-                }
-            }
-        } else if user_input.to_lowercase().starts_with("/think ") {
-            // Extract what to think about
-            let to_think = user_input[7..].trim();
-            if to_think.is_empty() {
-                println!("{}", "Please specify what to think about".red());
-                continue;
-            }
-
-            // Build a temporary session with the thinking prompt
-            let mut think_sess = session.clone();
-
-            // Convert conversation to a single user message
-            let mut conversation_text = String::new();
-            for msg in &think_sess.messages {
-                match msg {
-                    Message::System(txt) => {
-                        conversation_text.push_str("[System]\n");
-                        conversation_text.push_str(txt);
-                        conversation_text.push_str("\n\n");
-                    }
-                    Message::User(txt) => {
-                        conversation_text.push_str("[User]\n");
-                        conversation_text.push_str(txt);
-                        conversation_text.push_str("\n\n");
-                    }
-                    Message::Assistant(txt) => {
-                        conversation_text.push_str("[Assistant]\n");
-                        conversation_text.push_str(txt);
-                        conversation_text.push_str("\n\n");
-                    }
-                }
-            }
-
-            // Keep only system message and the combined conversation as user message
-            think_sess
-                .messages
-                .retain(|m| matches!(m, Message::System(_)));
-            think_sess.messages.push(Message::User(
-                format!("Analyze this conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.\n\nConversation:\n{}", to_think, conversation_text)
-            ));
-
-            match call_deepseek_api(&mut think_sess, "deepseek-reasoner").await {
-                Ok(response) => {
-                    println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
-
-                    // Add to messages
-                    session.messages.push(Message::Assistant(response.clone()));
-
-                }
-                Err(e) => {
-                    eprintln!("{}: {}", "Error during deep thinking".red(), e);
-                    session.messages.push(Message::Assistant(format!(
-                        "Error during deep thinking: {}",
-                        e
-                    )));
-                }
-            }
-            continue;
-        } else if user_input.to_lowercase() == "/clear" {
-            // Summarize and reset the conversation
-            match summarize_conversation(&session).await {
-                Ok(summary) => {
-                    // Keep only the system message and summary
-                    let system_msg = session
-                        .messages
-                        .iter()
-                        .find(|m| matches!(m, Message::System(_)))
-                        .cloned()
-                        .unwrap_or(Message::System(preamble.to_string()));
-
-                    session.messages = vec![
-                        system_msg,
-                        Message::Assistant(format!("(Conversation Summary)\n{}", summary)),
-                    ];
-
-                    // Clear variables and long_context
-                    session.variables.clear();
-                    // Re-run setup commands after clear
-                    match execute_setup_commands().await {
-                        Ok(output) => {
-                            if !output.is_empty() {
-                                session.messages.push(Message::Assistant(
-                                    format!("Setup commands re-executed:\n{}", output)
-                                ));
-                            }
-                        }
-                        Err(e) => eprintln!("Error executing setup commands: {}", e),
-                    }
-
-                    println!("{}", "Conversation cleared and summarized.".green());
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("{}: {}", "Error summarizing conversation".red(), e);
-                    continue;
-                }
-            }
+        // Handle special commands first
+        match handle_special_command(&user_input, &mut session, preamble).await {
+            CommandResult::Break => break,
+            CommandResult::Continue => continue,
+            CommandResult::Proceed => {} // Continue with normal processing
         }
 
         // 1) Add the user's message to the conversation and show it
