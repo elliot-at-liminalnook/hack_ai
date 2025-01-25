@@ -1200,7 +1200,7 @@ pub async fn process_tool_calls(
     let mut status_messages = Vec::new();
 
     for label in active_jobs {
-        let Some((status, stdout, stderr)) = {
+        let Some((status, stdout, stderr)) = ({
             let mut pm = PROCESS_MANAGER.write().await;
             match pm.get_logs(&label).await {
                 Ok((status, stdout, stderr)) => {
@@ -1214,11 +1214,11 @@ pub async fn process_tool_calls(
                 }
                 Err(_) => None,
             }
-        } else {
+        }) else {
             continue;
         };
 
-        if let Some((status, stdout, stderr)) = status {
+        {
             let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
             status_msg.push_str(&match status {
                 BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
