@@ -1225,24 +1225,24 @@ async fn job_info(session: &mut ConversationSession) -> Result<String> {
             continue;
         };
 
-        let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
+        let mut status_msg = format!("{} '{}' Status:\n", "Background Job".bold(), label.cyan().bold());
         status_msg.push_str(&match status {
-            BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
-            BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),
+            BackgroundStatus::Completed(c) => format!("{} COMPLETED (exit code {})\n", "🔵".blue(), c),
+            BackgroundStatus::Error(e) => format!("{} ERROR: {}\n", "🔴".red(), e.red()),
             _ => unreachable!(),
         });
 
         if !stdout.is_empty() {
             let lines: Vec<&str> = stdout.split('\n').collect();
             let recent = lines.len().saturating_sub(100);
-            status_msg.push_str("\nLast stdout:\n");
+            status_msg.push_str(&format!("\n{}:\n", "Last STDOUT".blue().bold()));
             status_msg.push_str(&lines[recent..].join("\n"));
         }
 
         if !stderr.is_empty() {
             let lines: Vec<&str> = stderr.split('\n').collect();
             let recent = lines.len().saturating_sub(100);
-            status_msg.push_str("\nLast stderr:\n");
+            status_msg.push_str(&format!("\n{}:\n", "Last STDERR".red().bold()));
             status_msg.push_str(&lines[recent..].join("\n"));
         }
 
