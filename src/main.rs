@@ -1654,8 +1654,7 @@ async fn handle_user_commands(
         // Force immediate status check of all jobs
         match job_info(session).await {
             Ok(results) => {
-                println!("{} {}", "[Job Status]".bright_cyan().bold(), results);
-                session.messages.push(Message::System(results));
+                println!("You eager beaver :]")
             }
             Err(e) => eprintln!("Error checking jobs: {}", e),
         }
