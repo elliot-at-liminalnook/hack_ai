@@ -358,9 +358,6 @@ pub struct ConversationSession {
     /// A set of small key-value variables (name -> (value, timestamp))
     pub variables: HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
 
-    /// A flexible "long context" knowledge base, stored as JSON.
-    /// Tools and the AI can append summarized data here (e.g. discovered hosts, vulnerabilities).
-    pub long_context: Value,
 }
 
 impl Default for ConversationSession {
@@ -374,7 +371,6 @@ impl ConversationSession {
         Self {
             messages: vec![],
             variables: HashMap::new(),
-            long_context: Value::Object(serde_json::Map::new()),
         }
     }
 
@@ -423,31 +419,7 @@ impl ConversationSession {
             .join("\n")
     }
 
-    /// Append data to our "long_context" knowledge base. For example:
-    /// session.append_to_long_context("tool_summaries", &json!({ "timestamp": "now", "summary": "some summary" }));
-    pub fn append_to_long_context(&mut self, key: &str, value: &Value) {
-        // Ensure long_context is an object
-        let obj = self.long_context.as_object_mut().unwrap();
 
-        // If the key doesn't exist, create an empty array
-        let entry = obj.entry(key.to_string()).or_insert(Value::Array(vec![]));
-
-        // Append to array
-        if let Value::Array(arr) = entry {
-            arr.push(value.clone());
-        }
-    }
-
-    /// Return a summarized view of the long_context. For demonstration,
-    /// we'll just JSON-stringify it. In a real system, you might keep this more condensed.
-    pub fn summarize_long_context(&self) -> String {
-        let s = serde_json::to_string_pretty(&self.long_context).unwrap_or_else(|_| "".to_string());
-        if s.trim().is_empty() || s == "{}" {
-            "".to_string()
-        } else {
-            format!("Knowledge Base:\n{}", s)
-        }
-    }
 }
 #[derive(Debug)]
 pub enum ToolCall {
@@ -1451,13 +1423,6 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             "Summary of tool results:\n{}",
                             summary
                         )));
-                        session.append_to_long_context(
-                            "tool_summaries",
-                            &json!({
-                                "timestamp": chrono::Utc::now().to_rfc3339(),
-                                "summary": summary
-                            }),
-                        );
                     }
                 }
             }
@@ -1594,13 +1559,6 @@ Use `<reflection>` blocks to document your thought process, plan your next steps
 * **Example:** `<reflection>I need to find the capital of France. First, I will use the <search> tool to search for "capital of France". Then, I will extract the answer from the search results.</reflection>`
 * **System Behavior:** The system will record your reflection but will not treat it as a tool call. It's for your internal reasoning and planning.
 
-**Long-Term Knowledge Base (long_context):**
-
-The `long_context` is a structured knowledge base where you can store summarized information and findings.  Tools and you can append data to it.  This knowledge is persisted across interactions and can be used to maintain context over longer conversations.  You can summarize and store important information in the `long_context` to build upon previously discovered knowledge.
-
-**Signaling Task Completion:**
-
-When you have finished answering the user's question or completing the requested task, and you do not need to perform any further tool calls, conclude your response with the tag `<done/>`.  This signals to the system that you have completed your chain of thought.
 
 **Example Conversation Flow:**
 
@@ -1615,8 +1573,6 @@ When you have finished answering the user's question or completing the requested
 * **Be mindful of security when using `<bash>`.**
 * **Utilize variables (`<set_var>`, `<get_var>`, `<list_vars>`) to manage short-term information.**
 * **Use `<reflection>` for planning and complex tasks.**
-* **Store summarized knowledge in the `long_context`.**
-* **End your final response with `<done/>` when finished.**
 
 By following these guidelines and effectively using the provided tools, you can be a highly effective and helpful AI assistant."#;
 
@@ -1688,9 +1644,8 @@ By following these guidelines and effectively using the provided tools, you can 
                         )),
                     ];
 
-                    // Clear variables and long_context
+                    // Clear variables
                     session.variables.clear();
-                    session.long_context = Value::Object(serde_json::Map::new());
 
                     println!(
                         "{} {}",
@@ -1749,21 +1704,9 @@ By following these guidelines and effectively using the provided tools, you can 
                 Ok(response) => {
                     println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
 
-                    // Add the deep thought to both the main session and long_context
-                    let thought = format!("(Deep Thought about '{}')\n{}", to_think, response);
-
                     // Add to messages
                     session.messages.push(Message::Assistant(thought.clone()));
 
-                    // Add to long_context
-                    session.append_to_long_context(
-                        "deep_thoughts",
-                        &json!({
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "topic": to_think,
-                            "thought": thought
-                        }),
-                    );
                 }
                 Err(e) => {
                     eprintln!("{}: {}", "Error during deep thinking".red(), e);
@@ -1793,8 +1736,6 @@ By following these guidelines and effectively using the provided tools, you can 
 
                     // Clear variables and long_context
                     session.variables.clear();
-                    session.long_context = Value::Object(serde_json::Map::new());
-
                     // Re-run setup commands after clear
                     match execute_setup_commands().await {
                         Ok(output) => {
@@ -1823,16 +1764,12 @@ By following these guidelines and effectively using the provided tools, you can 
 
         // Add context as assistant messages
         let recent_vars = session.recent_vars();
-        let knowledge_summary = session.summarize_long_context();
 
         if !recent_vars.is_empty() {
             session.messages.push(Message::Assistant(format!(
                 "Recent variables:\n{}",
                 recent_vars
             )));
-        }
-        if !knowledge_summary.is_empty() {
-            session.messages.push(Message::Assistant(knowledge_summary));
         }
 
         // 2) Call the LLM with a simple timeout, always using "deepseek-chat" for normal conversation
