@@ -17,7 +17,7 @@ use colored::*;
 use html2text::from_read;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
@@ -721,7 +721,7 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
                     .collect()
             })
             .unwrap_or_else(|| Vec::new());
-        let label = cap
+        let _label = cap
             .get(3)
             .map(|m| m.as_str().to_string())
             .unwrap_or_else(|| format!("job_{}", uuid::Uuid::new_v4()));
