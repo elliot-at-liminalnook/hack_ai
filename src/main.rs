@@ -475,53 +475,6 @@ pub enum ToolCall {
     ListVars,
 }
 
-//
-// -----------------------------------------------------------------------------
-// Reflection Blocks
-// -----------------------------------------------------------------------------
-
-fn extract_reflection_blocks(text: &str) -> Vec<String> {
-    let re_reflection = Regex::new(r"(?s)<reflection>(.*?)</reflection>").unwrap();
-    let mut blocks = Vec::new();
-    for cap in re_reflection.captures_iter(text) {
-        if let Some(m) = cap.get(1) {
-            blocks.push(m.as_str().trim().to_string());
-        }
-    }
-    blocks
-}
-
-//
-// -----------------------------------------------------------------------------
-// Summaries of Repetitive Tool Output
-// -----------------------------------------------------------------------------
-
-/// This function calls the LLM to summarize tool output with conversation context
-async fn summarize_tool_output(session: &ConversationSession, text: &str) -> Result<String> {
-    // If it's empty or short, just skip summarizing
-    if text.trim().is_empty() {
-        return Ok("".to_string());
-    }
-
-    // Build a summary session with recent context
-    let mut summary_sess = ConversationSession::new();
-    
-    // Include last 2 messages for context
-    let last_messages: Vec<_> = session.messages.iter().rev().take(2).collect();
-    for msg in last_messages.iter().rev() {
-        summary_sess.messages.push(msg.clone().clone());
-    }
-
-    // Add summarization instructions and tool output
-    summary_sess.messages.push(Message::System(
-        "You are a summarizer. First review the recent conversation context, then summarize the following tool output in bullet points. Focus on key information relevant to the user's current task and previous messages. Be concise but preserve crucial details.".to_string()
-    ));
-    summary_sess.messages.push(Message::User(text.to_string()));
-
-    // We reuse the normal deepseek-chat for summarizing tool outputs
-    let summary = call_deepseek_api(&mut summary_sess, "deepseek-chat").await?;
-    Ok(summary.trim().to_string())
-}
 
 //
 // -----------------------------------------------------------------------------
@@ -1113,10 +1066,7 @@ pub async fn process_tool_calls(
     initial_response: String,
 ) -> Result<String> {
     // Parse reflection blocks and store them
-    let reflection_blocks = extract_reflection_blocks(&initial_response);
-    for block in reflection_blocks {
-        session.messages.push(Message::Assistant(format!("(reflection)\n{}", block)));
-    }
+
 
     // Parse and execute tool calls once
     let tool_calls = parse_tool_calls(&initial_response);
@@ -1305,13 +1255,7 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             };
 
-            // Parse reflection blocks
-            let reflection_blocks = extract_reflection_blocks(&assistant_response);
-            for block in reflection_blocks {
-                session
-                    .messages
-                    .push(Message::Assistant(format!("(reflection)\n{}", block)));
-            }
+
 
             // Parse tool calls
             let tool_calls = parse_tool_calls(&assistant_response);
@@ -1429,16 +1373,6 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             }
 
-            if tool_results_text.len() > 50000 {
-                if let Ok(summary) = summarize_tool_output(&session, &tool_results_text).await {
-                    if !summary.is_empty() {
-                        session.messages.push(Message::Assistant(format!(
-                            "Summary of tool results:\n{}",
-                            summary
-                        )));
-                    }
-                }
-            }
 
             // Show assistant response
             let display_text = assistant_response.trim();
@@ -1738,7 +1672,7 @@ By following these guidelines and effectively using the provided tools, you can 
                     println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
 
                     // Add to messages
-                    session.messages.push(Message::Assistant(thought.clone()));
+                    session.messages.push(Message::Assistant(response.clone()));
 
                 }
                 Err(e) => {
@@ -1830,13 +1764,6 @@ By following these guidelines and effectively using the provided tools, you can 
             }
         };
 
-        // 3) Parse any reflection blocks
-        let reflection_blocks = extract_reflection_blocks(&assistant_response);
-        for block in reflection_blocks {
-            session
-                .messages
-                .push(Message::Assistant(format!("(reflection)\n{}", block)));
-        }
 
         // 4) Process tool calls once and display results
         let tool_results = process_tool_calls(&mut session, assistant_response.clone()).await?;
