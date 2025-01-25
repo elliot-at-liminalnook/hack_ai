@@ -1574,22 +1574,19 @@ Here are the available tools and their usage:
       * `<search query="latest cybersecurity threats" count="3" safe_search="false" />`
    * **Tool Response:** The tool will return a formatted text block containing a list of search results, including URLs and descriptions.
 
-2. **`<bash>` Tool:** Used to execute commands in a bash shell. 
+2. **`<bash>` Tool:** Used to execute commands in a bash shell. All commands run in the background automatically.
 
-   * **Call Format:** 
-     - For immediate commands (under 5 seconds to run): `<bash command="..." args="..." />`
-     - For background/long-running tasks (over 5 seconds to run): `<bash command="..." args="..." background="true" label="mylabel" />`
+   * **Call Format:** `<bash command="..." args="..." label="..." />`
    * **Parameters:**
       * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). **Avoid potentially harmful commands like `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.**
       * `args` (optional): Space-separated arguments for the command.
-      * `background` (optional): Set to "true" to run command in background for long-running tasks
-      * `label` (required for background): Unique name to track background job
+      * `label` (optional): Unique name to track background job. If not provided, one will be generated automatically.
    * **Example Calls:**
-      * Immediate command: `<bash command="ping" args="google.com -c 3" />`
-      * Background task: `<bash command="long_running_script.sh" background="true" label="data_processing" />`
+      * Simple command: `<bash command="ping" args="google.com -c 3" />`
+      * Long-running task: `<bash command="long_running_script.sh" label="data_processing" />`
    * **Tool Response:** 
-     - For immediate commands: Returns STDOUT/STDERR and exit code
-     - For background tasks: Returns job ID and status
+     - Returns job ID and status
+     - Example: "Spawned background job 'job_1234' with command: ping google.com -c 3"
    * **Background Job Management:**
      - Check status: `<bash_status label="mylabel" />`
      - Get logs: `<bash_logs label="mylabel" />` 
