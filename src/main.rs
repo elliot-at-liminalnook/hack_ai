@@ -33,7 +33,7 @@ async fn execute_setup_commands() -> Result<String> {
         }
         
         match run_bash_command(line).await {
-            Ok(result) => output.push_str(&format!("{}\n", result)),
+            Ok(result) => output.push_str(&format!("$ {}\n{}\n", line.green().bold(), result)),
             Err(e) => output.push_str(&format!("Error executing '{}': {}\n", line, e)),
         }
     }
