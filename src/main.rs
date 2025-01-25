@@ -1699,11 +1699,10 @@ Here are the available tools and their usage:
 
 2. **`<bash>` Tool:** Used to execute commands in a bash shell. All commands run in the background automatically.
 
-   * **Call Format:** `<bash command="..." args="..." label="..." />`
+   * **Call Format:** `<bash command="..." args="..." />`
    * **Parameters:**
       * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). **Avoid potentially harmful commands like `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.**
       * `args` (optional): Space-separated arguments for the command.
-      * `label` (optional): Unique name to track background job. If not provided, one will be generated automatically.
    * **Example Calls:**
       * Simple command: `<bash command="ping" args="google.com -c 3" />`
       * Long-running task: `<bash command="long_running_script.sh" label="data_processing" />`
