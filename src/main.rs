@@ -1881,115 +1881,12 @@ By following these guidelines and effectively using the provided tools, you can 
                 .push(Message::Assistant(format!("(reflection)\n{}", block)));
         }
 
-        // 4) Parse tool calls
-        let tool_calls = parse_tool_calls(&assistant_response);
-        let mut tool_results_text = String::new();
-        for call in tool_calls {
-            match call {
-
-                ToolCall::BashStatus { label } => {
-                    let status = {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.refresh_status(&label).await
-                    };
-                    let result = match status {
-                        Ok(st) => format!("Status for '{}': {:?}", label, st),
-                        Err(e) => format!("ERROR checking status: {}", e),
-                    };
-                    tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
-                }
-
-                ToolCall::BashLogs { label } => {
-                    let logs = {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.get_logs(&label).await
-                    };
-                    let result = match logs {
-                        Ok((st, out, err)) => {
-                            format!(
-                                "Logs for '{}':\nStatus: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
-                                label, st, out, err
-                            )
-                        }
-                        Err(e) => format!("ERROR fetching logs: {}", e),
-                    };
-                    tool_results_text.push_str(&format!("==== [BASH LOGS] ====\n{}\n\n", result));
-                }
-
-                ToolCall::BashTerminate { label } => {
-                    let result = {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.terminate(&label).await
-                    };
-                    let msg = match result {
-                        Ok(_) => format!("Terminated background job '{}'.", label),
-                        Err(e) => format!("ERROR terminating '{}': {}", label, e),
-                    };
-                    tool_results_text.push_str(&format!("==== [BASH TERMINATE] ====\n{}\n\n", msg));
-                }
-                ToolCall::Search {
-                    query,
-                    count,
-                    safe_search,
-                } => {
-                    let result = match run_search(&query, count, safe_search).await {
-                        Ok(r) => r,
-                        Err(e) => format!("ERROR during search: {}", e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                        query, result
-                    ));
-                }
-                ToolCall::Bash { command, args } => {
-                    let full_cmd = format!("{} {}", command, args.join(" "));
-                    let label = format!("job_{}", uuid::Uuid::new_v4());
-                    let result = match {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.spawn_process(&label, &full_cmd).await
-                    } {
-                        Ok(_) => format!(
-                            "Spawned background job '{}' with command: {}\nUse <bash_status label=\"{}\"/> to check status",
-                            label, full_cmd, label
-                        ),
-                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [BASH BACKGROUND] ====\n{}\n\n",
-                        result
-                    ));
-                }
-                ToolCall::Scrape { url, render_js } => {
-                    let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
-                        Ok(r) => r,
-                        Err(e) => format!("ERROR during scrape: {}", e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
-                        url, result
-                    ));
-                }
-                ToolCall::GetVar { name } => {
-                    let found = session.get_var(&name);
-                    let out = match found {
-                        Some(value) => format!("Variable '{}': {}", name, value),
-                        None => format!("Variable '{}' not found", name),
-                    };
-                    tool_results_text.push_str(&format!("==== [GET VAR result] ====\n{}\n\n", out));
-                }
-                ToolCall::SetVar { name, value } => {
-                    session.set_var(name.clone(), value.clone());
-                    tool_results_text.push_str(&format!(
-                        "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
-                        name, value
-                    ));
-                }
-                ToolCall::ListVars => {
-                    let result = session.list_vars();
-                    tool_results_text
-                        .push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
-                }
-            }
+        // 4) Process tool calls using the dedicated function
+        let tool_results = process_tool_calls(&mut session, assistant_response.clone()).await?;
+        
+        // 5) Display assistant response and tool results
+        if !tool_results.is_empty() {
+            println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
         }
 
         // 5) Summarize large tool output automatically
