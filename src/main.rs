@@ -1165,11 +1165,16 @@ pub async fn process_tool_calls(
                         let mut pm = PROCESS_MANAGER.write().await;
                         pm.spawn_process(&label, &full_cmd).await
                     } {
-                        Ok(_) => format!(
-                            "Spawned background job '{}' with command: {}\nUse <bash_status label=\"{}\"/> to check status",
-                            label, full_cmd, label
-                        ),
-                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
+                        Ok(_) => {
+                            let cmd_display = format!("$ {}", full_cmd.green().bold());
+                            let status_display = format!(
+                                "Spawned background job '{}'\nUse {} to check status",
+                                label.cyan().bold(),
+                                format!("<bash_status label=\"{}\"/>", label).yellow()
+                            );
+                            format!("{}\n{}", cmd_display, status_display)
+                        },
+                        Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
                     };
                     tool_results_text.push_str(&format!(
                         "==== [BASH BACKGROUND] ====\n{}\n\n",
@@ -1182,21 +1187,15 @@ pub async fn process_tool_calls(
                     safe_search,
                 } => {
                     let result = match run_search(&query, count, safe_search).await {
-                        Ok(r) => r,
-                        Err(e) => format!("ERROR during search: {}", e),
+                        Ok(r) => {
+                            let query_display = format!("Search Query: {}", query.green().bold());
+                            format!("{}\n{}", query_display, r)
+                        },
+                        Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
                     };
-                    // Then show tool results
-                    println!(
-                        "{} {}",
-                        "[Tool Results]".yellow().bold(),
-                        format!(
-                            "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                            query, result
-                        )
-                    );
                     tool_results_text.push_str(&format!(
-                        "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
-                        query, result
+                        "==== [SEARCH] ====\n{}\n\n",
+                        result
                     ));
                 }
 
@@ -1243,18 +1242,15 @@ pub async fn process_tool_calls(
                 }
                 ToolCall::Scrape { url, render_js } => {
                     let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
-                        Ok(r) => r,
-                        Err(e) => format!("ERROR during scrape: {}", e),
+                        Ok(r) => {
+                            let url_display = format!("Scraping URL: {}", url.green().bold());
+                            format!("{}\n{}", url_display, r)
+                        },
+                        Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
                     };
-                    // Then show tool results
-                    println!(
-                        "{} {}",
-                        "[Tool Results]".yellow().bold(),
-                        format!("==== [SCRAPE result for \"{}\"] ====\n{}\n\n", url, result)
-                    );
                     tool_results_text.push_str(&format!(
-                        "==== [SCRAPE result for \"{}\"] ====\n{}\n\n",
-                        url, result
+                        "==== [SCRAPE] ====\n{}\n\n",
+                        result
                     ));
                 }
                 ToolCall::GetVar { name } => {
