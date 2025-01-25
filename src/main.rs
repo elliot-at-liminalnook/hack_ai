@@ -1196,9 +1196,7 @@ pub async fn process_tool_calls(
 }
 
 
-fn job_info() {
-
-    // Automatic status reporting for completed/errored processes
+async fn job_info(session: &mut ConversationSession) -> Result<String> {
     let active_jobs = {
         let pm = PROCESS_MANAGER.read().await;
         pm.processes.keys().cloned().collect::<Vec<_>>()
@@ -1206,6 +1204,7 @@ fn job_info() {
 
     let mut labels_to_remove = Vec::new();
     let mut status_messages = Vec::new();
+    let mut tool_results_text = String::new();
 
     for label in active_jobs {
         let Some((status, stdout, stderr)) = ({
@@ -1226,34 +1225,32 @@ fn job_info() {
             continue;
         };
 
-        {
-            let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
-            status_msg.push_str(&match status {
-                BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
-                BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),
-                _ => unreachable!(),
-            });
+        let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
+        status_msg.push_str(&match status {
+            BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
+            BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),
+            _ => unreachable!(),
+        });
 
-            if !stdout.is_empty() {
-                let lines: Vec<&str> = stdout.split('\n').collect();
-                let recent = lines.len().saturating_sub(100);
-                status_msg.push_str("\nLast stdout:\n");
-                status_msg.push_str(&lines[recent..].join("\n"));
-            }
-
-            if !stderr.is_empty() {
-                let lines: Vec<&str> = stderr.split('\n').collect();
-                let recent = lines.len().saturating_sub(100);
-                status_msg.push_str("\nLast stderr:\n");
-                status_msg.push_str(&lines[recent..].join("\n"));
-            }
-
-            status_messages.push(status_msg);
+        if !stdout.is_empty() {
+            let lines: Vec<&str> = stdout.split('\n').collect();
+            let recent = lines.len().saturating_sub(100);
+            status_msg.push_str("\nLast stdout:\n");
+            status_msg.push_str(&lines[recent..].join("\n"));
         }
+
+        if !stderr.is_empty() {
+            let lines: Vec<&str> = stderr.split('\n').collect();
+            let recent = lines.len().saturating_sub(100);
+            status_msg.push_str("\nLast stderr:\n");
+            status_msg.push_str(&lines[recent..].join("\n"));
+        }
+
+        status_messages.push(status_msg);
     }
 
     // Add all collected status messages as system messages for LLM context
-    for msg in status_messages {
+    for msg in &status_messages {
         session.messages.push(Message::System(msg.clone()));
         tool_results_text.push_str(&format!("\n\n{}", msg));
     }
@@ -1265,6 +1262,8 @@ fn job_info() {
             pm.processes.remove(&label);
         }
     }
+
+    Ok(tool_results_text)
 }
 //
 // -----------------------------------------------------------------------------
@@ -1807,70 +1806,8 @@ By following these guidelines and effectively using the provided tools, you can 
         session.messages.push(Message::User(user_input.clone()));
 
         // Add background job status information
-        {
-            let active_jobs = {
-                let pm = PROCESS_MANAGER.read().await;
-                pm.processes.keys().cloned().collect::<Vec<_>>()
-            };
-
-            let mut status_messages = Vec::new();
-            let mut labels_to_remove = Vec::new();
-
-            for label in active_jobs {
-                let Some((status, stdout, stderr)) = ({
-                    let mut pm = PROCESS_MANAGER.write().await;
-                    match pm.get_logs(&label).await {
-                        Ok((status, stdout, stderr)) => {
-                            // Only report completed or errored processes
-                            if matches!(&status, BackgroundStatus::Completed(_) | BackgroundStatus::Error(_)) {
-                                labels_to_remove.push(label.clone());
-                                Some((status, stdout, stderr))
-                            } else {
-                                None
-                            }
-                        }
-                        Err(_) => None,
-                    }
-                }) else {
-                    continue;
-                };
-
-                let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
-                status_msg.push_str(&match status {
-                    BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
-                    BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),
-                    _ => unreachable!(),
-                });
-
-                if !stdout.is_empty() {
-                    let lines: Vec<&str> = stdout.split('\n').collect();
-                    let recent = lines.len().saturating_sub(100);
-                    status_msg.push_str("\nLast stdout:\n");
-                    status_msg.push_str(&lines[recent..].join("\n"));
-                }
-
-                if !stderr.is_empty() {
-                    let lines: Vec<&str> = stderr.split('\n').collect();
-                    let recent = lines.len().saturating_sub(100);
-                    status_msg.push_str("\nLast stderr:\n");
-                    status_msg.push_str(&lines[recent..].join("\n"));
-                }
-
-                status_messages.push(status_msg);
-            }
-
-            // Add all collected status messages as system messages for LLM context
-            for msg in status_messages {
-                session.messages.push(Message::System(msg));
-            }
-
-            // Remove completed/errored processes from manager
-            if !labels_to_remove.is_empty() {
-                let mut pm = PROCESS_MANAGER.write().await;
-                for label in labels_to_remove {
-                    pm.processes.remove(&label);
-                }
-            }
+        if let Err(e) = job_info(&mut session).await {
+            eprintln!("Error getting job info: {}", e);
         }
 
         // Add context as assistant messages
