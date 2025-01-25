@@ -1249,8 +1249,9 @@ async fn job_info(session: &mut ConversationSession) -> Result<String> {
         status_messages.push(status_msg);
     }
 
-    // Add all collected status messages as system messages for LLM context
+    // Print and add all collected status messages
     for msg in &status_messages {
+        println!("{} {}", "[Job Status]".bright_cyan().bold(), msg);
         session.messages.push(Message::System(msg.clone()));
         tool_results_text.push_str(&format!("\n\n{}", msg));
     }
