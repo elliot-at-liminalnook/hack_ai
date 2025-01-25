@@ -435,12 +435,6 @@ pub enum ToolCall {
         command: String,
         args: Vec<String>,
     },
-    /// <bash command="..." background="true" label="myjob" />
-    BashBackground {
-        label: String,
-        command: String,
-        args: Vec<String>,
-    },
 
     /// Check a background job’s status: <bash_status label="myjob" />
     BashStatus {
@@ -740,13 +734,12 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
         });
     }
 
-    // Enhanced BASH with optional background and label
-    // e.g. <bash command="ls" args="-l /tmp" background="true" label="job1" />
-    let re_bash_background = Regex::new(
-        r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]*)")?(?:\s+background="(true|false)")?(?:\s+label="([^"]+)")?\s*/>"#,
+    // BASH command parsing - all commands run in background by default
+    let re_bash = Regex::new(
+        r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]*)")?(?:\s+label="([^"]+)")?\s*/>"#,
     )
     .unwrap();
-    for cap in re_bash_background.captures_iter(assistant_text) {
+    for cap in re_bash.captures_iter(assistant_text) {
         let command = cap[1].trim().to_string();
         let args = cap
             .get(2)
@@ -757,29 +750,12 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
                     .collect()
             })
             .unwrap_or_else(|| Vec::new());
-        let background = cap.get(3).map(|m| m.as_str() == "true").unwrap_or(false);
         let label = cap
-            .get(4)
+            .get(3)
             .map(|m| m.as_str().to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| format!("job_{}", uuid::Uuid::new_v4()));
 
-        if background {
-            // It's a background bash call
-            let label_used = if label.is_empty() {
-                // If user forgot label, generate one or raise an error
-                format!("job_{}", uuid::Uuid::new_v4())
-            } else {
-                label
-            };
-            calls.push(ToolCall::BashBackground {
-                label: label_used,
-                command,
-                args,
-            });
-        } else {
-            // normal synchronous bash call
-            calls.push(ToolCall::Bash { command, args });
-        }
+        calls.push(ToolCall::Bash { command, args });
     }
 
     // <bash_status label="myjob" />
@@ -1496,13 +1472,19 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                     }
                     ToolCall::Bash { command, args } => {
                         let full_cmd = format!("{} {}", command, args.join(" "));
-                        let result = match run_bash_command(&full_cmd).await {
-                            Ok(r) => r,
-                            Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                        let label = format!("job_{}", uuid::Uuid::new_v4());
+                        let result = match {
+                            let mut pm = PROCESS_MANAGER.write().await;
+                            pm.spawn_process(&label, &full_cmd).await
+                        } {
+                            Ok(_) => format!(
+                                "Spawned background job '{}' with command: {}\nUse <bash_status label=\"{}\"/> to check status",
+                                label, full_cmd, label
+                            ),
+                            Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
                         };
                         tool_results_text.push_str(&format!(
-                            "\n{}\n{}\n",
-                            "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                            "==== [BASH BACKGROUND] ====\n{}\n\n",
                             result
                         ));
                     }
