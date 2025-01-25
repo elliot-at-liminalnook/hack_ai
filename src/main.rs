@@ -1890,8 +1890,8 @@ By following these guidelines and effectively using the provided tools, you can 
         }
 
         // 5) Summarize large tool output automatically
-        if tool_results_text.len() > 500 {
-            if let Ok(summary) = summarize_tool_output(&tool_results_text).await {
+        if tool_results.len() > 500 {
+            if let Ok(summary) = summarize_tool_output(&tool_results).await {
                 if !summary.is_empty() {
                     session.messages.push(Message::Assistant(format!(
                         "Summary of tool results:\n{}",
@@ -1909,11 +1909,11 @@ By following these guidelines and effectively using the provided tools, you can 
         }
 
         // If we had tool results, we can place them in conversation if they're not too large
-        if !tool_results_text.is_empty() {
-            if tool_results_text.len() <= MAX_TOOL_RESULT_SIZE {
+        if !tool_results.is_empty() {
+            if tool_results.len() <= MAX_TOOL_RESULT_SIZE {
                 session.messages.push(Message::Assistant(format!(
                     "Tool results:\n{}",
-                    tool_results_text
+                    tool_results
                 )));
             } else {
                 session.messages.push(Message::Assistant(
@@ -1932,8 +1932,8 @@ By following these guidelines and effectively using the provided tools, you can 
         if !final_response.is_empty() {
             println!("{} {}", "[Assistant]".blue().bold(), final_response);
         }
-        if !tool_results_text.is_empty() {
-            println!("{} {}", "[Tool Results]".yellow().bold(), tool_results_text);
+        if !tool_results.is_empty() {
+            println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
         }
 
         // Save session
