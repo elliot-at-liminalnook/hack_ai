@@ -16,6 +16,31 @@ use tracing::error;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
+/// Execute commands from setup_commands.txt file at startup
+async fn execute_setup_commands() -> Result<String> {
+    let setup_file = PathBuf::from("setup_commands.txt");
+    if !setup_file.exists() {
+        return Ok("No setup_commands.txt file found.".to_string());
+    }
+
+    let content = std::fs::read_to_string(setup_file)?;
+    let mut output = String::new();
+    
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        
+        match run_bash_command(line).await {
+            Ok(result) => output.push_str(&format!("{}\n", result)),
+            Err(e) => output.push_str(&format!("Error executing '{}': {}\n", line, e)),
+        }
+    }
+    
+    Ok(output)
+}
+
 use lazy_static::lazy_static;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1677,6 +1702,18 @@ By following these guidelines and effectively using the provided tools, you can 
     if session.messages.is_empty() {
         // Provide an initial system role instruction if none is present
         session.messages.push(Message::System(preamble.to_string()));
+        
+        // Execute setup commands if any
+        match execute_setup_commands().await {
+            Ok(output) => {
+                if !output.is_empty() {
+                    session.messages.push(Message::Assistant(
+                        format!("Initial system setup results:\n{}", output)
+                    ));
+                }
+            }
+            Err(e) => eprintln!("Error executing setup commands: {}", e),
+        }
     }
 
     // REPL loop
@@ -1819,6 +1856,18 @@ By following these guidelines and effectively using the provided tools, you can 
                     // Clear variables and long_context
                     session.variables.clear();
                     session.long_context = Value::Object(serde_json::Map::new());
+
+                    // Re-run setup commands after clear
+                    match execute_setup_commands().await {
+                        Ok(output) => {
+                            if !output.is_empty() {
+                                session.messages.push(Message::Assistant(
+                                    format!("Setup commands re-executed:\n{}", output)
+                                ));
+                            }
+                        }
+                        Err(e) => eprintln!("Error executing setup commands: {}", e),
+                    }
 
                     println!("{}", "Conversation cleared and summarized.".green());
                     continue;
