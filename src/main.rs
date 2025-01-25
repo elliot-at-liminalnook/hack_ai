@@ -1650,6 +1650,16 @@ async fn handle_user_commands(
             Err(e) => eprintln!("{}: {}", "Error summarizing conversation".red(), e),
         }
         CommandResult::Continue
+    } else if input_lower == "/eager" {
+        // Force immediate status check of all jobs
+        match job_info(session).await {
+            Ok(results) => {
+                println!("{} {}", "[Job Status]".bright_cyan().bold(), results);
+                session.messages.push(Message::System(results));
+            }
+            Err(e) => eprintln!("Error checking jobs: {}", e),
+        }
+        CommandResult::Continue
     } else {
         CommandResult::Proceed
     }
