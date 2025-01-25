@@ -1227,7 +1227,9 @@ async fn job_info(session: &mut ConversationSession) -> Result<String> {
             continue;
         };
 
-        let mut status_msg = format!("{} '{}' (Command: {})\nStatus:\n", "Background Job".bold(), label.cyan().bold(), bp.command.green());
+        let pm = PROCESS_MANAGER.read().await;
+        let command = pm.processes.get(&label).map(|p| p.command.as_str()).unwrap_or("[unknown]");
+        let mut status_msg = format!("{} '{}' (Command: {})\nStatus:\n", "Background Job".bold(), label.cyan().bold(), command.green());
         status_msg.push_str(&match status {
             BackgroundStatus::Completed(c) => format!("{} COMPLETED (exit code {})\n", "🔵".blue(), c),
             BackgroundStatus::Error(e) => format!("{} ERROR: {}\n", "🔴".red(), e.red()),
