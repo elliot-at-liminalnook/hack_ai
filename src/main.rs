@@ -1511,7 +1511,7 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             }
 
             if tool_results_text.len() > 50000 {
-                if let Ok(summary) = summarize_tool_output(session, &tool_results_text).await {
+                if let Ok(summary) = summarize_tool_output(&session, &tool_results_text).await {
                     if !summary.is_empty() {
                         session.messages.push(Message::Assistant(format!(
                             "Summary of tool results:\n{}",
@@ -1944,7 +1944,7 @@ By following these guidelines and effectively using the provided tools, you can 
 
         // 5) Summarize large tool output automatically
         if tool_results.len() > 500 {
-            if let Ok(summary) = summarize_tool_output(session, &tool_results).await {
+            if let Ok(summary) = summarize_tool_output(&session, &tool_results).await {
                 if !summary.is_empty() {
                     session.messages.push(Message::Assistant(format!(
                         "Summary of tool results:\n{}",
