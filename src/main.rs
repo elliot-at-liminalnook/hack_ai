@@ -1600,14 +1600,24 @@ Here are the available tools and their usage:
 
 2. **`<bash>` Tool:** Used to execute commands in a bash shell. **Use this tool with caution and only when necessary for system-level tasks.**
 
-   * **Call Format:** `<bash command="..." args="..." />`
+   * **Call Format:** 
+     - For immediate commands: `<bash command="..." args="..." />`
+     - For background/long-running tasks: `<bash command="..." args="..." background="true" label="mylabel" />`
    * **Parameters:**
       * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). **Avoid potentially harmful commands like `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.**
       * `args` (optional): Space-separated arguments for the command.
+      * `background` (optional): Set to "true" to run command in background for long-running tasks
+      * `label` (required for background): Unique name to track background job
    * **Example Calls:**
-      * `<bash command="ping" args="google.com -c 3" />`
-      * `<bash command="ls" args="-l /tmp" />`
-   * **Tool Response:** The tool will return the STDOUT and STDERR output of the command, along with the exit code.
+      * Immediate command: `<bash command="ping" args="google.com -c 3" />`
+      * Background task: `<bash command="long_running_script.sh" background="true" label="data_processing" />`
+   * **Tool Response:** 
+     - For immediate commands: Returns STDOUT/STDERR and exit code
+     - For background tasks: Returns job ID and status
+   * **Background Job Management:**
+     - Check status: `<bash_status label="mylabel" />`
+     - Get logs: `<bash_logs label="mylabel" />` 
+     - Terminate: `<bash_terminate label="mylabel" />`
 
 3. **`<scrape>` Tool:** Used to fetch the content of a web page.
 
