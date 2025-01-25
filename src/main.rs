@@ -119,14 +119,6 @@ impl BackgroundProcessManager {
             ));
         }
 
-        // For safety, check forbidden commands even with sudo
-        let forbidden_commands = ["rm", "mv", "dd", "shutdown", "reboot", "kill"];
-        if forbidden_commands.iter().any(|&cmd| command.contains(cmd)) && !command.starts_with("sudo") {
-            return Err(anyhow::anyhow!(
-                "Command contains forbidden operation: {}",
-                command
-            ));
-        }
 
         // Spawn child
         let child = tokio::process::Command::new("bash")
