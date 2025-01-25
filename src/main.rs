@@ -119,9 +119,9 @@ impl BackgroundProcessManager {
             ));
         }
 
-        // For safety, check forbidden commands
+        // For safety, check forbidden commands even with sudo
         let forbidden_commands = ["rm", "mv", "dd", "shutdown", "reboot", "kill"];
-        if forbidden_commands.iter().any(|&cmd| command.contains(cmd)) {
+        if forbidden_commands.iter().any(|&cmd| command.contains(cmd)) && !command.starts_with("sudo") {
             return Err(anyhow::anyhow!(
                 "Command contains forbidden operation: {}",
                 command
@@ -1710,7 +1710,9 @@ Here are the available tools and their usage:
 
    * **Call Format:** `<bash command="..." args="..." />`
    * **Parameters:**
-      * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). **Avoid potentially harmful commands like `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.**
+      * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). 
+      * **Sudo Usage:** Prefix with `sudo` for elevated privileges. Ensure the system is configured for passwordless sudo for specific commands.
+      * **Dangerous Commands:** Still prohibited even with sudo: `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.
       * `args` (optional): Space-separated arguments for the command.
    * **Example Calls:**
       * Simple command: `<bash command="ping" args="google.com -c 3" />`
