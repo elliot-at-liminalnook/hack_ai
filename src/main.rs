@@ -546,7 +546,7 @@ async fn summarize_tool_output(session: &ConversationSession, text: &str) -> Res
 // -- Bash Tool
 async fn run_bash_command(command: &str) -> Result<String> {
     // Validate command for safety
-    let forbidden_commands = ["rm", "mv", "dd", "shutdown", "reboot", "kill"];
+    let forbidden_commands = ["rm -rf", "shutdown", "reboot"];
     if forbidden_commands.iter().any(|&cmd| command.contains(cmd)) {
         return Err(anyhow!("Command contains forbidden operation: {}", command));
     }
