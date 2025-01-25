@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use clap::Parser;
 use colored::*;
 use html2text::from_read;
 use regex::Regex;
@@ -10,11 +11,259 @@ use std::fs::File;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Duration;
-use clap::Parser;
 use tokio::time::timeout;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 use url::Url;
+
+use lazy_static::lazy_static;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Child;
+use tokio::sync::RwLock;
+
+/// Represents a single background process we spawned.
+struct BackgroundProcess {
+    command: String,
+    label: String,
+    stdout_lines: Vec<String>,
+    stderr_lines: Vec<String>,
+    status: BackgroundStatus,
+
+    // The child handle (we keep so we can poll or kill it).
+    child: Option<Child>,
+
+    // A JoinHandle for reading stdout/stderr in the background
+    io_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Process status: Running, Completed, or Error
+#[derive(Debug, Clone)]
+enum BackgroundStatus {
+    Running,
+    Completed(i32), // exit code
+    Error(String),  // error message
+}
+
+impl BackgroundProcess {
+    fn new(command: String, label: String, child: Child) -> Self {
+        Self {
+            command,
+            label,
+            stdout_lines: vec![],
+            stderr_lines: vec![],
+            status: BackgroundStatus::Running,
+            child: Some(child),
+            io_task: None,
+        }
+    }
+}
+
+/// A global manager that tracks background processes by label.
+struct BackgroundProcessManager {
+    processes: HashMap<String, BackgroundProcess>,
+}
+
+impl BackgroundProcessManager {
+    fn new() -> Self {
+        Self {
+            processes: HashMap::new(),
+        }
+    }
+
+    /// Spawn a new background process if the label is not already in use.
+    /// Returns an error if the label is taken or process spawn fails.
+    async fn spawn_process(&mut self, label: &str, command: &str) -> anyhow::Result<()> {
+        if self.processes.contains_key(label) {
+            return Err(anyhow::anyhow!(
+                "Background label '{}' is already in use!",
+                label
+            ));
+        }
+
+        // For safety, check forbidden commands
+        let forbidden_commands = ["rm", "mv", "dd", "shutdown", "reboot", "kill"];
+        if forbidden_commands.iter().any(|&cmd| command.contains(cmd)) {
+            return Err(anyhow::anyhow!(
+                "Command contains forbidden operation: {}",
+                command
+            ));
+        }
+
+        // Spawn child
+        let mut child = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        // Wrap child in our data structure
+        let mut bp = BackgroundProcess::new(command.to_string(), label.to_string(), child);
+
+        // Start an I/O monitoring task that reads stdout/stderr lines as they come
+        let child_stdout = bp
+            .child
+            .as_mut()
+            .unwrap()
+            .stdout
+            .take()
+            .map(BufReader::new)
+            .unwrap();
+        let child_stderr = bp
+            .child
+            .as_mut()
+            .unwrap()
+            .stderr
+            .take()
+            .map(BufReader::new)
+            .unwrap();
+
+        // label for the async move
+        let label_clone = label.to_string();
+
+        let io_task = tokio::spawn({
+            let mut stdout_reader = child_stdout.lines();
+            let mut stderr_reader = child_stderr.lines();
+
+            async move {
+                loop {
+                    tokio::select! {
+                        // read next line from stdout
+                        maybe_stdout_line = stdout_reader.next_line() => {
+                            match maybe_stdout_line {
+                                Ok(Some(line)) => {
+                                    // Store the line in the manager
+                                    let mut pm = PROCESS_MANAGER.write().await;
+                                    if let Some(proc) = pm.processes.get_mut(&label_clone) {
+                                        proc.stdout_lines.push(line);
+                                    }
+                                },
+                                Ok(None) => {
+                                    // stdout is EOF
+                                },
+                                Err(e) => {
+                                    let mut pm = PROCESS_MANAGER.write().await;
+                                    if let Some(proc) = pm.processes.get_mut(&label_clone) {
+                                        proc.stderr_lines.push(format!("Error reading stdout: {}", e));
+                                    }
+                                }
+                            }
+                        },
+
+                        // read next line from stderr
+                        maybe_stderr_line = stderr_reader.next_line() => {
+                            match maybe_stderr_line {
+                                Ok(Some(line)) => {
+                                    let mut pm = PROCESS_MANAGER.write().await;
+                                    if let Some(proc) = pm.processes.get_mut(&label_clone) {
+                                        proc.stderr_lines.push(line);
+                                    }
+                                },
+                                Ok(None) => {
+                                    // stderr is EOF
+                                },
+                                Err(e) => {
+                                    let mut pm = PROCESS_MANAGER.write().await;
+                                    if let Some(proc) = pm.processes.get_mut(&label_clone) {
+                                        proc.stderr_lines.push(format!("Error reading stderr: {}", e));
+                                    }
+                                }
+                            }
+                        },
+
+                        // If both streams have closed, break.
+                        else => {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        bp.io_task = Some(io_task);
+        self.processes.insert(label.to_string(), bp);
+
+        Ok(())
+    }
+
+    /// Check if a background process is still running, finished, or in error.
+    /// Also updates the stored exit code if completed.
+    async fn refresh_status(&mut self, label: &str) -> anyhow::Result<BackgroundStatus> {
+        let maybe_proc = self.processes.get_mut(label);
+        if maybe_proc.is_none() {
+            return Err(anyhow::anyhow!(
+                "No background process with label '{}'",
+                label
+            ));
+        }
+        let bp = maybe_proc.unwrap();
+
+        if let BackgroundStatus::Running = bp.status {
+            // If still "Running", check if the child is done
+            if let Some(child) = bp.child.as_mut() {
+                match child.try_wait()? {
+                    Some(status) => {
+                        // The process ended
+                        let code = status.code().unwrap_or(-1);
+                        bp.status = BackgroundStatus::Completed(code);
+                        // We can close the child's handle to free resources
+                        bp.child = None;
+                    }
+                    None => {
+                        // Still running
+                    }
+                }
+            }
+        }
+        Ok(bp.status.clone())
+    }
+
+    /// Return the logs and status for the given label
+    async fn get_logs(
+        &mut self,
+        label: &str,
+    ) -> anyhow::Result<(BackgroundStatus, String, String)> {
+        self.refresh_status(label).await?; // update status
+        let maybe_proc = self.processes.get(label);
+        if maybe_proc.is_none() {
+            return Err(anyhow::anyhow!(
+                "No background process with label '{}'",
+                label
+            ));
+        }
+        let bp = maybe_proc.unwrap();
+        let stdout = bp.stdout_lines.join("\n");
+        let stderr = bp.stderr_lines.join("\n");
+        Ok((bp.status.clone(), stdout, stderr))
+    }
+
+    /// Terminate a running process (if it is still running).
+    /// This will mark status as Error if we forcibly kill it.
+    async fn terminate(&mut self, label: &str) -> anyhow::Result<()> {
+        let maybe_proc = self.processes.get_mut(label);
+        if maybe_proc.is_none() {
+            return Err(anyhow::anyhow!(
+                "No background process with label '{}'",
+                label
+            ));
+        }
+        let bp = maybe_proc.unwrap();
+        if let Some(child) = bp.child.as_mut() {
+            // Attempt to kill it
+            child.kill().await?;
+            bp.status = BackgroundStatus::Error("Terminated by user".to_string());
+            bp.child = None;
+        }
+        Ok(())
+    }
+}
+
+lazy_static! {
+    /// A global read/write lock to manage background processes
+    static ref PROCESS_MANAGER: RwLock<BackgroundProcessManager> = RwLock::new(BackgroundProcessManager::new());
+}
 
 //
 // -----------------------------------------------------------------------------
@@ -122,9 +371,7 @@ impl ConversationSession {
         }
 
         // Sort by timestamp (newest first)
-        let mut vars: Vec<_> = self.variables.iter()
-            .map(|(k, (v, t))| (t, k, v))
-            .collect();
+        let mut vars: Vec<_> = self.variables.iter().map(|(k, (v, t))| (t, k, v)).collect();
         vars.sort_by(|a, b| b.0.cmp(a.0));
 
         vars.iter()
@@ -140,9 +387,7 @@ impl ConversationSession {
         }
 
         // Sort by timestamp (newest first)
-        let mut vars: Vec<_> = self.variables.iter()
-            .map(|(k, (v, t))| (t, k, v))
-            .collect();
+        let mut vars: Vec<_> = self.variables.iter().map(|(k, (v, t))| (t, k, v)).collect();
         vars.sort_by(|a, b| b.0.cmp(a.0));
 
         // Take top 10
@@ -179,8 +424,6 @@ impl ConversationSession {
         }
     }
 }
-
-/// A tool call enum. We parse these from the assistant's output <tags>.
 #[derive(Debug)]
 pub enum ToolCall {
     Search {
@@ -192,6 +435,28 @@ pub enum ToolCall {
         command: String,
         args: Vec<String>,
     },
+    /// <bash command="..." background="true" label="myjob" />
+    BashBackground {
+        label: String,
+        command: String,
+        args: Vec<String>,
+    },
+
+    /// Check a background job’s status: <bash_status label="myjob" />
+    BashStatus {
+        label: String,
+    },
+
+    /// Get the logs for a background job: <bash_logs label="myjob" />
+    BashLogs {
+        label: String,
+    },
+
+    /// Terminate a background job: <bash_terminate label="myjob" />
+    BashTerminate {
+        label: String,
+    },
+
     Scrape {
         url: String,
         render_js: Option<bool>,
@@ -293,7 +558,9 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
     // For demonstration, do a simple call to Brave Search if an API key is set:
     let api_key = env::var("BRAVE_SEARCH_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
-        return Ok("No BRAVE_SEARCH_API_KEY found. Provide one to enable real searching.".to_string());
+        return Ok(
+            "No BRAVE_SEARCH_API_KEY found. Provide one to enable real searching.".to_string(),
+        );
     }
 
     let client = reqwest::Client::new();
@@ -352,12 +619,14 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
 // -- Scrape Tool
 async fn run_scrape(url: &str, render_js: bool) -> Result<String> {
     tracing::debug!("Starting scrape of URL: {}", url);
-    
+
     // For real usage, put your ScrapingBee API key in SCRAPINGBEE_API_KEY
     let api_key = env::var("SCRAPINGBEE_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
         tracing::warn!("No SCRAPINGBEE_API_KEY found - scraping disabled");
-        return Ok("No SCRAPINGBEE_API_KEY found. Provide one to enable real scraping.".to_string());
+        return Ok(
+            "No SCRAPINGBEE_API_KEY found. Provide one to enable real scraping.".to_string(),
+        );
     }
 
     tracing::debug!("Initializing HTTP client");
@@ -365,13 +634,11 @@ async fn run_scrape(url: &str, render_js: bool) -> Result<String> {
     let base_url = "https://app.scrapingbee.com/api/v1/";
 
     tracing::debug!("Building request with params: render_js={}", render_js);
-    let request = client
-        .get(base_url)
-        .query(&[
-            ("api_key", &api_key),
-            ("url", &url.to_string()),
-            ("render_js", &render_js.to_string()),
-        ]);
+    let request = client.get(base_url).query(&[
+        ("api_key", &api_key),
+        ("url", &url.to_string()),
+        ("render_js", &render_js.to_string()),
+    ]);
 
     tracing::debug!("Sending request to ScrapingBee API");
     let resp = match request.send().await {
@@ -473,19 +740,68 @@ fn parse_tool_calls(assistant_text: &str) -> Vec<ToolCall> {
         });
     }
 
-    // Example usage:
-    // <bash command="ls" args="-l -a" />
-    let re_bash =
-        Regex::new(r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]+)")?\s*/>"#).unwrap();
-    for cap in re_bash.captures_iter(assistant_text) {
+    // Enhanced BASH with optional background and label
+    // e.g. <bash command="ls" args="-l /tmp" background="true" label="job1" />
+    let re_bash_background = Regex::new(
+        r#"(?s)<bash\s+command="([^"]+)"(?:\s+args="([^"]*)")?(?:\s+background="(true|false)")?(?:\s+label="([^"]+)")?\s*/>"#,
+    )
+    .unwrap();
+    for cap in re_bash_background.captures_iter(assistant_text) {
         let command = cap[1].trim().to_string();
         let args = cap
             .get(2)
-            .map(|m| m.as_str().split_whitespace().map(|s| s.to_string()).collect())
+            .map(|m| {
+                m.as_str()
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
             .unwrap_or_else(|| Vec::new());
-        calls.push(ToolCall::Bash { command, args });
+        let background = cap.get(3).map(|m| m.as_str() == "true").unwrap_or(false);
+        let label = cap
+            .get(4)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+
+        if background {
+            // It's a background bash call
+            let label_used = if label.is_empty() {
+                // If user forgot label, generate one or raise an error
+                format!("job_{}", uuid::Uuid::new_v4())
+            } else {
+                label
+            };
+            calls.push(ToolCall::BashBackground {
+                label: label_used,
+                command,
+                args,
+            });
+        } else {
+            // normal synchronous bash call
+            calls.push(ToolCall::Bash { command, args });
+        }
     }
 
+    // <bash_status label="myjob" />
+    let re_bash_status = Regex::new(r#"(?s)<bash_status\s+label="([^"]+)"\s*/>"#).unwrap();
+    for cap in re_bash_status.captures_iter(assistant_text) {
+        let label = cap[1].trim().to_string();
+        calls.push(ToolCall::BashStatus { label });
+    }
+
+    // <bash_logs label="myjob" />
+    let re_bash_logs = Regex::new(r#"(?s)<bash_logs\s+label="([^"]+)"\s*/>"#).unwrap();
+    for cap in re_bash_logs.captures_iter(assistant_text) {
+        let label = cap[1].trim().to_string();
+        calls.push(ToolCall::BashLogs { label });
+    }
+
+    // <bash_terminate label="myjob" />
+    let re_bash_terminate = Regex::new(r#"(?s)<bash_terminate\s+label="([^"]+)"\s*/>"#).unwrap();
+    for cap in re_bash_terminate.captures_iter(assistant_text) {
+        let label = cap[1].trim().to_string();
+        calls.push(ToolCall::BashTerminate { label });
+    }
     // Example usage:
     // <scrape url="https://example.com" render_js="true" />
     let re_scrape =
@@ -549,111 +865,109 @@ struct DeepSeekMessage {
 /// Summarize the conversation if it exceeds a certain size (CONVERSATION_CHAR_LIMIT).
 /// We'll do that by calling `summarize_conversation` with the "deepseek-reasoner" model
 /// and replacing older messages with a summary message (keeping the original system message).
-async fn call_deepseek_api(
-    session: &mut ConversationSession,
-    model_name: &str,
-) -> Result<String> {
+async fn call_deepseek_api(session: &mut ConversationSession, model_name: &str) -> Result<String> {
     // Box the future to handle recursion
     Box::pin(async move {
+        // If conversation is too large, summarize and reduce it
+        if estimate_conversation_size(&session) > CONVERSATION_CHAR_LIMIT {
+            // Summarize the conversation so far
+            let summary = summarize_conversation(session).await?;
+            // Replace older messages with the system message + summary
+            let original_system_msg = session
+                .messages
+                .iter()
+                .find(|m| matches!(m, Message::System(_)))
+                .cloned()
+                .unwrap_or(Message::System(
+                    "You are an EXPERT AI ASSISTANT".to_string(),
+                ));
 
-    // If conversation is too large, summarize and reduce it
-    if estimate_conversation_size(&session) > CONVERSATION_CHAR_LIMIT {
-        // Summarize the conversation so far
-        let summary = summarize_conversation(session).await?;
-        // Replace older messages with the system message + summary
-        let original_system_msg = session
-            .messages
-            .iter()
-            .find(|m| matches!(m, Message::System(_)))
-            .cloned()
-            .unwrap_or(Message::System(
-                "You are an EXPERT AI ASSISTANT".to_string(),
-            ));
+            // We'll keep only the system message + a new "assistant" summary +
+            // the last user message if there's one (so we keep the context of the user's question).
+            let last_user_message = session
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, Message::User(_)))
+                .cloned();
 
-        // We'll keep only the system message + a new "assistant" summary + 
-        // the last user message if there's one (so we keep the context of the user's question).
-        let last_user_message = session
-            .messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m, Message::User(_)))
-            .cloned();
+            session.messages.clear();
+            // Keep the original system message
+            session.messages.push(original_system_msg);
 
-        session.messages.clear();
-        // Keep the original system message
-        session.messages.push(original_system_msg);
+            // Keep the summary as an "assistant" message
+            session.messages.push(Message::Assistant(format!(
+                "(Conversation Summary)\n{}",
+                summary
+            )));
 
-        // Keep the summary as an "assistant" message
-        session.messages.push(Message::Assistant(
-            format!("(Conversation Summary)\n{}", summary)
-        ));
-
-        // Keep the last user message (if any) so the conversation makes sense
-        if let Some(user_msg) = last_user_message {
-            session.messages.push(user_msg);
+            // Keep the last user message (if any) so the conversation makes sense
+            if let Some(user_msg) = last_user_message {
+                session.messages.push(user_msg);
+            }
         }
-    }
 
-    // Convert session messages -> DeepSeekMessage
-    let mut ds_messages = Vec::new();
-    for msg in &session.messages {
-        match msg {
-            Message::System(txt) => ds_messages.push(DeepSeekMessage {
-                role: "system".into(),
-                content: txt.clone(),
-            }),
-            Message::User(txt) => ds_messages.push(DeepSeekMessage {
-                role: "user".into(),
-                content: txt.clone(),
-            }),
-            Message::Assistant(txt) => ds_messages.push(DeepSeekMessage {
-                role: "assistant".into(),
-                content: txt.clone(),
-            }),
+        // Convert session messages -> DeepSeekMessage
+        let mut ds_messages = Vec::new();
+        for msg in &session.messages {
+            match msg {
+                Message::System(txt) => ds_messages.push(DeepSeekMessage {
+                    role: "system".into(),
+                    content: txt.clone(),
+                }),
+                Message::User(txt) => ds_messages.push(DeepSeekMessage {
+                    role: "user".into(),
+                    content: txt.clone(),
+                }),
+                Message::Assistant(txt) => ds_messages.push(DeepSeekMessage {
+                    role: "assistant".into(),
+                    content: txt.clone(),
+                }),
+            }
         }
-    }
 
-    let req_body = DeepSeekChatRequest {
-        model: model_name.to_string(),
-        messages: ds_messages,
-        stream: false,
-        temperature: 0.7,
-    };
+        let req_body = DeepSeekChatRequest {
+            model: model_name.to_string(),
+            messages: ds_messages,
+            stream: false,
+            temperature: 0.7,
+        };
 
-    let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        error!("Missing DEEPSEEK_API_KEY environment variable!");
-        return Err(anyhow!("DEEPSEEK_API_KEY not set"));
-    }
+        let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            error!("Missing DEEPSEEK_API_KEY environment variable!");
+            return Err(anyhow!("DEEPSEEK_API_KEY not set"));
+        }
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://api.deepseek.com/chat/completions")
-        .bearer_auth(api_key)
-        .json(&req_body)
-        .send()
-        .await?;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post("https://api.deepseek.com/chat/completions")
+            .bearer_auth(api_key)
+            .json(&req_body)
+            .send()
+            .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await?;
-        return Err(anyhow!("DeepSeek API Error: {}", text));
-    }
+        if !resp.status().is_success() {
+            let text = resp.text().await?;
+            return Err(anyhow!("DeepSeek API Error: {}", text));
+        }
 
-    let json_resp: Value = resp.json().await?;
-    // Usually: { "choices": [ { "message": {"role":"assistant","content":"hello"} } ], ... }
-    if let Some(choices) = json_resp.get("choices") {
-        if let Some(first_choice) = choices.get(0) {
-            if let Some(msg) = first_choice.get("message") {
-                if let Some(content) = msg.get("content") {
-                    let content_str = content.as_str().unwrap_or("").to_string();
-                    return Ok(content_str);
+        let json_resp: Value = resp.json().await?;
+        // Usually: { "choices": [ { "message": {"role":"assistant","content":"hello"} } ], ... }
+        if let Some(choices) = json_resp.get("choices") {
+            if let Some(first_choice) = choices.get(0) {
+                if let Some(msg) = first_choice.get("message") {
+                    if let Some(content) = msg.get("content") {
+                        let content_str = content.as_str().unwrap_or("").to_string();
+                        return Ok(content_str);
+                    }
                 }
             }
         }
-    }
 
-    Err(anyhow!("No valid content in DeepSeek API response"))
-    }).await
+        Err(anyhow!("No valid content in DeepSeek API response"))
+    })
+    .await
 }
 
 //
@@ -809,9 +1123,31 @@ pub async fn process_tool_calls(
         }
 
         let mut tool_results_text = String::new();
-        
+
         for call in tool_calls {
             match call {
+                ToolCall::Bash { command, args } => {
+                    let full_cmd = format!("{} {}", command, args.join(" "));
+                    let result = match run_bash_command(&full_cmd).await {
+                        Ok(r) => r,
+                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                    };
+                    // Then show tool results
+                    println!(
+                        "{} {}",
+                        "[Tool Results]".yellow().bold(),
+                        format!(
+                            "{}\n{}\n",
+                            "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                            result
+                        )
+                    );
+                    tool_results_text.push_str(&format!(
+                        "{}\n{}\n",
+                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                        result
+                    ));
+                }
                 ToolCall::Search {
                     query,
                     count,
@@ -825,30 +1161,76 @@ pub async fn process_tool_calls(
                     println!(
                         "{} {}",
                         "[Tool Results]".yellow().bold(),
-                        format!("==== [SEARCH result for \"{}\"] ====\n{}\n\n", query, result)
+                        format!(
+                            "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
+                            query, result
+                        )
                     );
                     tool_results_text.push_str(&format!(
                         "==== [SEARCH result for \"{}\"] ====\n{}\n\n",
                         query, result
                     ));
                 }
-                ToolCall::Bash { command, args } => {
+
+                ToolCall::BashBackground {
+                    label,
+                    command,
+                    args,
+                } => {
                     let full_cmd = format!("{} {}", command, args.join(" "));
-                    let result = match run_bash_command(&full_cmd).await {
-                        Ok(r) => r,
-                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                    let result = match {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.spawn_process(&label, &full_cmd).await
+                    } {
+                        Ok(_) => format!(
+                            "Spawned background job '{}' with command: {}",
+                            label, full_cmd
+                        ),
+                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
                     };
-                    // Then show tool results
-                    println!(
-                        "{} {}",
-                        "[Tool Results]".yellow().bold(),
-                        format!("{}\n{}\n", "==== [BASH COMMAND RESULTS] ====".yellow().bold(), result)
-                    );
-                    tool_results_text.push_str(&format!(
-                        "{}\n{}\n",
-                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
-                        result
-                    ));
+                    tool_results_text
+                        .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
+                }
+
+                ToolCall::BashStatus { label } => {
+                    let status = {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.refresh_status(&label).await
+                    };
+                    let result = match status {
+                        Ok(st) => format!("Status for '{}': {:?}", label, st),
+                        Err(e) => format!("ERROR checking status: {}", e),
+                    };
+                    tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
+                }
+
+                ToolCall::BashLogs { label } => {
+                    let logs = {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.get_logs(&label).await
+                    };
+                    let result = match logs {
+                        Ok((st, out, err)) => {
+                            format!(
+                                "Logs for '{}':\nStatus: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
+                                label, st, out, err
+                            )
+                        }
+                        Err(e) => format!("ERROR fetching logs: {}", e),
+                    };
+                    tool_results_text.push_str(&format!("==== [BASH LOGS] ====\n{}\n\n", result));
+                }
+
+                ToolCall::BashTerminate { label } => {
+                    let result = {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.terminate(&label).await
+                    };
+                    let msg = match result {
+                        Ok(_) => format!("Terminated background job '{}'.", label),
+                        Err(e) => format!("ERROR terminating '{}': {}", label, e),
+                    };
+                    tool_results_text.push_str(&format!("==== [BASH TERMINATE] ====\n{}\n\n", msg));
                 }
                 ToolCall::Scrape { url, render_js } => {
                     let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
@@ -871,10 +1253,8 @@ pub async fn process_tool_calls(
                         Some(value) => format!("Variable '{}': {}", name, value),
                         None => format!("Variable '{}' not found", name),
                     };
-                    tool_results_text.push_str(&format!(
-                        "==== [GET VAR result] ====\n{}\n\n",
-                        result
-                    ));
+                    tool_results_text
+                        .push_str(&format!("==== [GET VAR result] ====\n{}\n\n", result));
                 }
                 ToolCall::SetVar { name, value } => {
                     session.set_var(name.clone(), value.clone());
@@ -885,10 +1265,8 @@ pub async fn process_tool_calls(
                 }
                 ToolCall::ListVars => {
                     let result = session.list_vars();
-                    tool_results_text.push_str(&format!(
-                        "==== [LIST VARS result] ====\n{}\n\n",
-                        result
-                    ));
+                    tool_results_text
+                        .push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
                 }
             }
         }
@@ -998,10 +1376,9 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             // Parse reflection blocks
             let reflection_blocks = extract_reflection_blocks(&assistant_response);
             for block in reflection_blocks {
-                session.messages.push(Message::Assistant(format!(
-                    "(reflection)\n{}",
-                    block
-                )));
+                session
+                    .messages
+                    .push(Message::Assistant(format!("(reflection)\n{}", block)));
             }
 
             // Parse tool calls
@@ -1009,6 +1386,69 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             let mut tool_results_text = String::new();
             for call in tool_calls {
                 match call {
+                    ToolCall::BashBackground {
+                        label,
+                        command,
+                        args,
+                    } => {
+                        let full_cmd = format!("{} {}", command, args.join(" "));
+                        let result = match {
+                            let mut pm = PROCESS_MANAGER.write().await;
+                            pm.spawn_process(&label, &full_cmd).await
+                        } {
+                            Ok(_) => format!(
+                                "Spawned background job '{}' with command: {}",
+                                label, full_cmd
+                            ),
+                            Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
+                        };
+                        tool_results_text
+                            .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
+                    }
+
+                    ToolCall::BashStatus { label } => {
+                        let status = {
+                            let mut pm = PROCESS_MANAGER.write().await;
+                            pm.refresh_status(&label).await
+                        };
+                        let result = match status {
+                            Ok(st) => format!("Status for '{}': {:?}", label, st),
+                            Err(e) => format!("ERROR checking status: {}", e),
+                        };
+                        tool_results_text
+                            .push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
+                    }
+
+                    ToolCall::BashLogs { label } => {
+                        let logs = {
+                            let mut pm = PROCESS_MANAGER.write().await;
+                            pm.get_logs(&label).await
+                        };
+                        let result = match logs {
+                            Ok((st, out, err)) => {
+                                format!(
+                                    "Logs for '{}':\nStatus: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
+                                    label, st, out, err
+                                )
+                            }
+                            Err(e) => format!("ERROR fetching logs: {}", e),
+                        };
+                        tool_results_text
+                            .push_str(&format!("==== [BASH LOGS] ====\n{}\n\n", result));
+                    }
+
+                    ToolCall::BashTerminate { label } => {
+                        let result = {
+                            let mut pm = PROCESS_MANAGER.write().await;
+                            pm.terminate(&label).await
+                        };
+                        let msg = match result {
+                            Ok(_) => format!("Terminated background job '{}'.", label),
+                            Err(e) => format!("ERROR terminating '{}': {}", label, e),
+                        };
+                        tool_results_text
+                            .push_str(&format!("==== [BASH TERMINATE] ====\n{}\n\n", msg));
+                    }
                     ToolCall::Search {
                         query,
                         count,
@@ -1051,10 +1491,8 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             Some(value) => format!("Variable '{}': {}", name, value),
                             None => format!("Variable '{}' not found", name),
                         };
-                        tool_results_text.push_str(&format!(
-                            "==== [GET VAR result] ====\n{}\n\n",
-                            out
-                        ));
+                        tool_results_text
+                            .push_str(&format!("==== [GET VAR result] ====\n{}\n\n", out));
                     }
                     ToolCall::SetVar { name, value } => {
                         session.set_var(name.clone(), value.clone());
@@ -1065,10 +1503,8 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                     }
                     ToolCall::ListVars => {
                         let result = session.list_vars();
-                        tool_results_text.push_str(&format!(
-                            "==== [LIST VARS result] ====\n{}\n\n",
-                            result
-                        ));
+                        tool_results_text
+                            .push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
                     }
                 }
             }
@@ -1098,11 +1534,7 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             }
 
             if !tool_results_text.is_empty() {
-                println!(
-                    "{} {}",
-                    "[Tool Results]".yellow().bold(),
-                    tool_results_text
-                );
+                println!("{} {}", "[Tool Results]".yellow().bold(), tool_results_text);
             }
         }
     }
@@ -1283,25 +1715,34 @@ By following these guidelines and effectively using the provided tools, you can 
                 println!("{}", "Please specify what to forget".red());
                 continue;
             }
-            
+
             match forget_conversation(&session, to_forget).await {
                 Ok(summary) => {
                     // Keep only the system message and summary
-                    let system_msg = session.messages.iter()
+                    let system_msg = session
+                        .messages
+                        .iter()
                         .find(|m| matches!(m, Message::System(_)))
                         .cloned()
                         .unwrap_or(Message::System(preamble.to_string()));
-                    
+
                     session.messages = vec![
                         system_msg,
-                        Message::Assistant(format!("(Conversation Summary - Forgot '{}')\n{}", to_forget, summary))
+                        Message::Assistant(format!(
+                            "(Conversation Summary - Forgot '{}')\n{}",
+                            to_forget, summary
+                        )),
                     ];
-                    
+
                     // Clear variables and long_context
                     session.variables.clear();
                     session.long_context = Value::Object(serde_json::Map::new());
-                    
-                    println!("{} {}", "Conversation updated to forget:".green(), to_forget);
+
+                    println!(
+                        "{} {}",
+                        "Conversation updated to forget:".green(),
+                        to_forget
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -1316,10 +1757,10 @@ By following these guidelines and effectively using the provided tools, you can 
                 println!("{}", "Please specify what to think about".red());
                 continue;
             }
-            
+
             // Build a temporary session with the thinking prompt
             let mut think_sess = session.clone();
-            
+
             // Convert conversation to a single user message
             let mut conversation_text = String::new();
             for msg in &think_sess.messages {
@@ -1341,23 +1782,25 @@ By following these guidelines and effectively using the provided tools, you can 
                     }
                 }
             }
-            
+
             // Keep only system message and the combined conversation as user message
-            think_sess.messages.retain(|m| matches!(m, Message::System(_)));
+            think_sess
+                .messages
+                .retain(|m| matches!(m, Message::System(_)));
             think_sess.messages.push(Message::User(
                 format!("Analyze this conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.\n\nConversation:\n{}", to_think, conversation_text)
             ));
-            
+
             match call_deepseek_api(&mut think_sess, "deepseek-reasoner").await {
                 Ok(response) => {
                     println!("{} {}", "[Deep Thought]".bright_blue().bold(), response);
-                    
+
                     // Add the deep thought to both the main session and long_context
                     let thought = format!("(Deep Thought about '{}')\n{}", to_think, response);
-                    
+
                     // Add to messages
                     session.messages.push(Message::Assistant(thought.clone()));
-                    
+
                     // Add to long_context
                     session.append_to_long_context(
                         "deep_thoughts",
@@ -1370,9 +1813,10 @@ By following these guidelines and effectively using the provided tools, you can 
                 }
                 Err(e) => {
                     eprintln!("{}: {}", "Error during deep thinking".red(), e);
-                    session.messages.push(Message::Assistant(
-                        format!("Error during deep thinking: {}", e)
-                    ));
+                    session.messages.push(Message::Assistant(format!(
+                        "Error during deep thinking: {}",
+                        e
+                    )));
                 }
             }
             continue;
@@ -1381,20 +1825,22 @@ By following these guidelines and effectively using the provided tools, you can 
             match summarize_conversation(&session).await {
                 Ok(summary) => {
                     // Keep only the system message and summary
-                    let system_msg = session.messages.iter()
+                    let system_msg = session
+                        .messages
+                        .iter()
                         .find(|m| matches!(m, Message::System(_)))
                         .cloned()
                         .unwrap_or(Message::System(preamble.to_string()));
-                    
+
                     session.messages = vec![
                         system_msg,
-                        Message::Assistant(format!("(Conversation Summary)\n{}", summary))
+                        Message::Assistant(format!("(Conversation Summary)\n{}", summary)),
                     ];
-                    
+
                     // Clear variables and long_context
                     session.variables.clear();
                     session.long_context = Value::Object(serde_json::Map::new());
-                    
+
                     println!("{}", "Conversation cleared and summarized.".green());
                     continue;
                 }
@@ -1424,7 +1870,11 @@ By following these guidelines and effectively using the provided tools, you can 
         }
 
         // 2) Call the LLM with a simple timeout, always using "deepseek-chat" for normal conversation
-        let result = timeout(Duration::from_secs(30), call_deepseek_api(&mut session, "deepseek-chat")).await;
+        let result = timeout(
+            Duration::from_secs(30),
+            call_deepseek_api(&mut session, "deepseek-chat"),
+        )
+        .await;
 
         let assistant_response = match result {
             Ok(Ok(content)) => content,
@@ -1447,10 +1897,9 @@ By following these guidelines and effectively using the provided tools, you can 
         // 3) Parse any reflection blocks
         let reflection_blocks = extract_reflection_blocks(&assistant_response);
         for block in reflection_blocks {
-            session.messages.push(Message::Assistant(format!(
-                "(reflection)\n{}",
-                block
-            )));
+            session
+                .messages
+                .push(Message::Assistant(format!("(reflection)\n{}", block)));
         }
 
         // 4) Parse tool calls
@@ -1458,6 +1907,66 @@ By following these guidelines and effectively using the provided tools, you can 
         let mut tool_results_text = String::new();
         for call in tool_calls {
             match call {
+                ToolCall::BashBackground {
+                    label,
+                    command,
+                    args,
+                } => {
+                    let full_cmd = format!("{} {}", command, args.join(" "));
+                    let result = match {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.spawn_process(&label, &full_cmd).await
+                    } {
+                        Ok(_) => format!(
+                            "Spawned background job '{}' with command: {}",
+                            label, full_cmd
+                        ),
+                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
+                    };
+                    tool_results_text
+                        .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
+                }
+
+                ToolCall::BashStatus { label } => {
+                    let status = {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.refresh_status(&label).await
+                    };
+                    let result = match status {
+                        Ok(st) => format!("Status for '{}': {:?}", label, st),
+                        Err(e) => format!("ERROR checking status: {}", e),
+                    };
+                    tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
+                }
+
+                ToolCall::BashLogs { label } => {
+                    let logs = {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.get_logs(&label).await
+                    };
+                    let result = match logs {
+                        Ok((st, out, err)) => {
+                            format!(
+                                "Logs for '{}':\nStatus: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
+                                label, st, out, err
+                            )
+                        }
+                        Err(e) => format!("ERROR fetching logs: {}", e),
+                    };
+                    tool_results_text.push_str(&format!("==== [BASH LOGS] ====\n{}\n\n", result));
+                }
+
+                ToolCall::BashTerminate { label } => {
+                    let result = {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.terminate(&label).await
+                    };
+                    let msg = match result {
+                        Ok(_) => format!("Terminated background job '{}'.", label),
+                        Err(e) => format!("ERROR terminating '{}': {}", label, e),
+                    };
+                    tool_results_text.push_str(&format!("==== [BASH TERMINATE] ====\n{}\n\n", msg));
+                }
                 ToolCall::Search {
                     query,
                     count,
@@ -1500,10 +2009,7 @@ By following these guidelines and effectively using the provided tools, you can 
                         Some(value) => format!("Variable '{}': {}", name, value),
                         None => format!("Variable '{}' not found", name),
                     };
-                    tool_results_text.push_str(&format!(
-                        "==== [GET VAR result] ====\n{}\n\n",
-                        out
-                    ));
+                    tool_results_text.push_str(&format!("==== [GET VAR result] ====\n{}\n\n", out));
                 }
                 ToolCall::SetVar { name, value } => {
                     session.set_var(name.clone(), value.clone());
@@ -1514,10 +2020,8 @@ By following these guidelines and effectively using the provided tools, you can 
                 }
                 ToolCall::ListVars => {
                     let result = session.list_vars();
-                    tool_results_text.push_str(&format!(
-                        "==== [LIST VARS result] ====\n{}\n\n",
-                        result
-                    ));
+                    tool_results_text
+                        .push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
                 }
             }
         }
@@ -1550,25 +2054,23 @@ By following these guidelines and effectively using the provided tools, you can 
                 )));
             } else {
                 session.messages.push(Message::Assistant(
-                    "Tool results too large to store in session".to_string()
+                    "Tool results too large to store in session".to_string(),
                 ));
             }
         }
 
         // 6) Add the assistant's raw response to the conversation
         let final_response = assistant_response.clone();
-        session.messages.push(Message::Assistant(final_response.clone()));
+        session
+            .messages
+            .push(Message::Assistant(final_response.clone()));
 
         // Display assistant response and tool results
         if !final_response.is_empty() {
             println!("{} {}", "[Assistant]".blue().bold(), final_response);
         }
         if !tool_results_text.is_empty() {
-            println!(
-                "{} {}",
-                "[Tool Results]".yellow().bold(),
-                tool_results_text
-            );
+            println!("{} {}", "[Tool Results]".yellow().bold(), tool_results_text);
         }
 
         // Save session
