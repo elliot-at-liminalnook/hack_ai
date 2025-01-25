@@ -1034,24 +1034,59 @@ async fn summarize_conversation(session: &ConversationSession) -> Result<String>
         }
     }
 
-    // We'll build a minimal session specifically for summarization, using the "deepseek-reasoner" model
-    let mut summary_sess = ConversationSession::new();
+    // Create the API request directly
+    let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        error!("Missing DEEPSEEK_API_KEY environment variable!");
+        return Err(anyhow!("DEEPSEEK_API_KEY not set"));
+    }
 
-    // Keep the same system message we've had since the beginning (or a simpler directive).
-    // The user explicitly said "We always want to keep the system message the same" in normal usage,
-    // but for summarizing the conversation, let's give the reasoner a direct instruction:
-    summary_sess.messages.push(Message::System(
-        "You are a specialized summarizer (deepseek-reasoner). Summarize the following conversation. 
+    let messages = vec![
+        DeepSeekMessage {
+            role: "system".into(),
+            content: "You are a specialized summarizer (deepseek-reasoner). Summarize the following conversation. 
 Focus on user goals/intent, key points discovered, important data. Be concise but do not lose critical context. 
-Omit extraneous details.".to_string()
-    ));
+Omit extraneous details.".to_string(),
+        },
+        DeepSeekMessage {
+            role: "user".into(),
+            content: conversation_text,
+        },
+    ];
 
-    // Then put the entire conversation in as user text:
-    summary_sess.messages.push(Message::User(conversation_text));
+    let req_body = DeepSeekChatRequest {
+        model: "deepseek-reasoner".to_string(),
+        messages,
+        stream: false,
+        temperature: 0.7,
+    };
 
-    // Call the reasoner
-    let summary = call_deepseek_api(&mut summary_sess, "deepseek-reasoner").await?;
-    Ok(summary.trim().to_string())
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.deepseek.com/chat/completions")
+        .bearer_auth(api_key)
+        .json(&req_body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await?;
+        return Err(anyhow!("DeepSeek API Error: {}", text));
+    }
+
+    let json_resp: Value = resp.json().await?;
+    if let Some(choices) = json_resp.get("choices") {
+        if let Some(first_choice) = choices.get(0) {
+            if let Some(msg) = first_choice.get("message") {
+                if let Some(content) = msg.get("content") {
+                    let content_str = content.as_str().unwrap_or("").to_string();
+                    return Ok(content_str.trim().to_string());
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("No valid content in DeepSeek API response"))
 }
 
 //
