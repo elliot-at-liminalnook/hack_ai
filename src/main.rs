@@ -566,7 +566,7 @@ async fn run_search(query: &str, count: Option<u8>, safe_search: Option<bool>) -
     let client = reqwest::Client::new();
     let url = "https://api.search.brave.com/res/v1/web/search";
 
-    let count = count.unwrap_or(5);
+    let count = count.unwrap_or(10);
     let safe = safe_search.unwrap_or(true);
     let safesearch = if safe { "strict" } else { "off" };
     let params = [
@@ -1300,7 +1300,7 @@ pub async fn process_tool_calls(
 
         // Now re-invoke the LLM with the updated conversation, using "deepseek-chat"
         let next_response = timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(300),
             call_deepseek_api(session, "deepseek-chat"),
         )
         .await??;
@@ -1357,7 +1357,7 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             println!("{} {}", "[User]".green().bold(), user_input);
 
             let result = timeout(
-                Duration::from_secs(30),
+                Duration::from_secs(300),
                 call_deepseek_api(&mut session, "deepseek-chat"),
             )
             .await;
@@ -1881,7 +1881,7 @@ By following these guidelines and effectively using the provided tools, you can 
 
         // 2) Call the LLM with a simple timeout, always using "deepseek-chat" for normal conversation
         let result = timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(300),
             call_deepseek_api(&mut session, "deepseek-chat"),
         )
         .await;
