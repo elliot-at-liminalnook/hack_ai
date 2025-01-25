@@ -8,7 +8,7 @@ async fn append_to_memories(memory: &str) -> Result<()> {
         .create(true)
         .open("memories.txt")
         .await?;
-        
+
     file.write_all(format!("{}\n", memory).as_bytes()).await?;
     Ok(())
 }
@@ -38,19 +38,19 @@ async fn execute_setup_commands() -> Result<String> {
 
     let content = std::fs::read_to_string(setup_file)?;
     let mut output = String::new();
-    
+
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        
+
         match run_bash_command(line).await {
             Ok(result) => output.push_str(&format!("$ {}\n{}\n", line.green().bold(), result)),
             Err(e) => output.push_str(&format!("Error executing '{}': {}\n", line, e)),
         }
     }
-    
+
     Ok(output)
 }
 
@@ -370,7 +370,6 @@ pub struct ConversationSession {
 
     /// A set of small key-value variables (name -> (value, timestamp))
     pub variables: HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
-
 }
 
 impl Default for ConversationSession {
@@ -431,8 +430,6 @@ impl ConversationSession {
             .collect::<Vec<_>>()
             .join("\n")
     }
-
-
 }
 #[derive(Debug)]
 pub enum ToolCall {
@@ -474,7 +471,6 @@ pub enum ToolCall {
     },
     ListVars,
 }
-
 
 //
 // -----------------------------------------------------------------------------
@@ -1067,7 +1063,6 @@ pub async fn process_tool_calls(
 ) -> Result<String> {
     // Parse reflection blocks and store them
 
-
     // Parse and execute tool calls once
     let tool_calls = parse_tool_calls(&initial_response);
     let mut tool_results_text = String::new();
@@ -1089,17 +1084,21 @@ pub async fn process_tool_calls(
                             format!("<bash_status label=\"{}\"/>", label).yellow()
                         );
                         format!("{}\n{}", cmd_display, status_display)
-                    },
+                    }
                     Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
                 };
                 tool_results_text.push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
             }
-            ToolCall::Search { query, count, safe_search } => {
+            ToolCall::Search {
+                query,
+                count,
+                safe_search,
+            } => {
                 let result = match run_search(&query, count, safe_search).await {
                     Ok(r) => {
                         let query_display = format!("Search Query: {}", query.green().bold());
                         format!("{}\n{}", query_display, r)
-                    },
+                    }
                     Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
                 };
                 tool_results_text.push_str(&format!("==== [SEARCH] ====\n{}\n\n", result));
@@ -1113,7 +1112,10 @@ pub async fn process_tool_calls(
                     Ok((st, stdout, stderr)) => {
                         let pm = PROCESS_MANAGER.read().await;
                         if let Some(proc) = pm.processes.get(&label) {
-                            let mut output = format!("Command: {}\nStatus for '{}': {:?}\n", proc.command, label, st);
+                            let mut output = format!(
+                                "Command: {}\nStatus for '{}': {:?}\n",
+                                proc.command, label, st
+                            );
                             if !stdout.is_empty() {
                                 output.push_str(&format!("\nSTDOUT:\n{}\n", stdout));
                             }
@@ -1124,7 +1126,7 @@ pub async fn process_tool_calls(
                         } else {
                             format!("Status for '{}': {:?}", label, st)
                         }
-                    },
+                    }
                     Err(e) => format!("ERROR checking status: {}", e),
                 };
                 tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
@@ -1161,7 +1163,7 @@ pub async fn process_tool_calls(
                     Ok(r) => {
                         let url_display = format!("Scraping URL: {}", url.green().bold());
                         format!("{}\n{}", url_display, r)
-                    },
+                    }
                     Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
                 };
                 tool_results_text.push_str(&format!("==== [SCRAPE] ====\n{}\n\n", result));
@@ -1182,55 +1184,57 @@ pub async fn process_tool_calls(
             }
             ToolCall::ListVars => {
                 let result = session.list_vars();
-                tool_results_text.push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
+                tool_results_text
+                    .push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
             }
         }
     }
 
+    // Add automatic status reporting with logs to messages
+    let active_jobs = {
+        let pm = PROCESS_MANAGER.read().await;
+        pm.processes.keys().cloned().collect::<Vec<_>>()
+    };
 
-         // Add automatic status reporting with logs to messages                                                                                                                       
-         let active_jobs = {                                                                                                                                                           
-            let pm = PROCESS_MANAGER.read().await;                                                                                                                                    
-            pm.processes.keys().cloned().collect::<Vec<_>>()                                                                                                                          
-        };                                                                                                                                                                            
-                                                                                                                                                                                      
-        for label in active_jobs {                                                                                                                                                    
-            let logs = {                                                                                                                                                              
-                let mut pm = PROCESS_MANAGER.write().await;                                                                                                                           
-                pm.get_logs(&label).await                                                                                                                                             
-            };                                                                                                                                                                        
-                                                                                                                                                                                      
-            if let Ok((status, stdout, stderr)) = logs {                                                                                                                              
-                // Create status message                                                                                                                                              
-                let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());                                                                                   
-                                                                                                                                                                                      
-                // Add status                                                                                                                                                         
-                status_msg.push_str(&match status {                                                                                                                                   
-                    BackgroundStatus::Running => "🟢 RUNNING\n".to_string(),                                                                                                                      
-                    BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),                                                                                    
-                    BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),                                                                                                       
-                });                                                                                                                                                                   
-                                                                                                                                                                                      
-                // Add recent logs (last 5 lines each)                                                                                                                                
-                if !stdout.is_empty() {                                                                                                                                               
-                    let lines: Vec<&str> = stdout.split('\n').collect();                                                                                                              
-                    let recent = lines.len().saturating_sub(5);                                                                                                                       
-                    status_msg.push_str("\nLast stdout:\n");                                                                                                                          
-                    status_msg.push_str(&lines[recent..].join("\n"));                                                                                                                 
-                }                                                                                                                                                                     
-                                                                                                                                                                                      
-                if !stderr.is_empty() {                                                                                                                                               
-                    let lines: Vec<&str> = stderr.split('\n').collect();                                                                                                              
-                    let recent = lines.len().saturating_sub(5);                                                                                                                       
-                    status_msg.push_str("\nLast stderr:\n");                                                                                                                          
-                    status_msg.push_str(&lines[recent..].join("\n"));                                                                                                                 
-                }                                                                                                                                                                     
-                                                                                                                                                                                      
-                // Add to session messages and tool results                                                                                                                           
-                session.messages.push(Message::Assistant(status_msg.clone()));                                                                                                        
-                tool_results_text.push_str(&format!("\n\n{}", status_msg));                                                                                                           
-            }                                                                                                                                                                         
-        }   
+    for label in active_jobs {
+        let logs = {
+            let mut pm = PROCESS_MANAGER.write().await;
+            pm.get_logs(&label).await
+        };
+
+        if let Ok((status, stdout, stderr)) = logs {
+            // Create status message
+            let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
+
+            // Add status
+            status_msg.push_str(&match status {
+                BackgroundStatus::Running => "🟢 RUNNING\n".to_string(),
+                BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
+                BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),
+            });
+
+            // Add recent logs (last 5 lines each)
+            if !stdout.is_empty() {
+                let lines: Vec<&str> = stdout.split('\n').collect();
+                let recent = lines.len().saturating_sub(5);
+                status_msg.push_str("\nLast stdout:\n");
+                status_msg.push_str(&lines[recent..].join("\n"));
+            }
+
+            if !stderr.is_empty() {
+                let lines: Vec<&str> = stderr.split('\n').collect();
+                let recent = lines.len().saturating_sub(5);
+                status_msg.push_str("\nLast stderr:\n");
+                status_msg.push_str(&lines[recent..].join("\n"));
+            }
+
+            // Add to session messages and tool results
+            session
+                .messages
+                .push(Message::Assistant(status_msg.clone()));
+            tool_results_text.push_str(&format!("\n\n{}", status_msg));
+        }
+    }
 
     // Return tool outputs
     Ok(format!("{}", tool_results_text))
@@ -1300,15 +1304,11 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             };
 
-
-
             // Parse tool calls
             let tool_calls = parse_tool_calls(&assistant_response);
             let mut tool_results_text = String::new();
             for call in tool_calls {
                 match call {
-                    
-
                     ToolCall::BashStatus { label } => {
                         let status = {
                             let mut pm = PROCESS_MANAGER.write().await;
@@ -1379,10 +1379,8 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                             ),
                             Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
                         };
-                        tool_results_text.push_str(&format!(
-                            "==== [BASH BACKGROUND] ====\n{}\n\n",
-                            result
-                        ));
+                        tool_results_text
+                            .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
                     }
                     ToolCall::Scrape { url, render_js } => {
                         let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
@@ -1418,7 +1416,6 @@ async fn run_test_session(session_path: &str) -> Result<()> {
                 }
             }
 
-
             // Show assistant response
             let display_text = assistant_response.trim();
             if !display_text.is_empty() {
@@ -1451,15 +1448,19 @@ struct Args {
 /// Result of handling a special command
 #[derive(PartialEq)]
 enum CommandResult {
-    Break,     // Should break main loop
-    Continue,  // Should continue to next iteration
-    Proceed,   // Should proceed with normal processing
+    Break,    // Should break main loop
+    Continue, // Should continue to next iteration
+    Proceed,  // Should proceed with normal processing
 }
 
 /// Handle special commands like /exit, /remember, etc.
-async fn handle_user_commands(user_input: &str, session: &mut ConversationSession, preamble: &str) -> CommandResult {
+async fn handle_user_commands(
+    user_input: &str,
+    session: &mut ConversationSession,
+    preamble: &str,
+) -> CommandResult {
     let input_lower = user_input.to_lowercase();
-    
+
     if input_lower == "/exit" {
         println!("{}", "Goodbye!".green());
         CommandResult::Break
@@ -1469,7 +1470,7 @@ async fn handle_user_commands(user_input: &str, session: &mut ConversationSessio
             println!("{}", "Please provide something to remember".red());
             return CommandResult::Continue;
         }
-        
+
         match append_to_memories(memory).await {
             Ok(_) => println!("{}", "Added to memories.txt".green()),
             Err(e) => eprintln!("{}: {}", "Error saving memory".red(), e),
@@ -1499,7 +1500,11 @@ async fn handle_user_commands(user_input: &str, session: &mut ConversationSessio
                     )),
                 ];
                 session.variables.clear();
-                println!("{} {}", "Conversation updated to forget:".green(), to_forget);
+                println!(
+                    "{} {}",
+                    "Conversation updated to forget:".green(),
+                    to_forget
+                );
             }
             Err(e) => eprintln!("{}: {}", "Error forgetting conversation".red(), e),
         }
@@ -1515,13 +1520,19 @@ async fn handle_user_commands(user_input: &str, session: &mut ConversationSessio
         let mut conversation_text = String::new();
         for msg in &think_sess.messages {
             match msg {
-                Message::System(txt) => conversation_text.push_str(&format!("[System]\n{}\n\n", txt)),
+                Message::System(txt) => {
+                    conversation_text.push_str(&format!("[System]\n{}\n\n", txt))
+                }
                 Message::User(txt) => conversation_text.push_str(&format!("[User]\n{}\n\n", txt)),
-                Message::Assistant(txt) => conversation_text.push_str(&format!("[Assistant]\n{}\n\n", txt)),
+                Message::Assistant(txt) => {
+                    conversation_text.push_str(&format!("[Assistant]\n{}\n\n", txt))
+                }
             }
         }
 
-        think_sess.messages.retain(|m| matches!(m, Message::System(_)));
+        think_sess
+            .messages
+            .retain(|m| matches!(m, Message::System(_)));
         think_sess.messages.push(Message::User(
             format!("Analyze this conversation and provide a detailed, thoughtful response to: '{}'. Consider all aspects and implications. Be thorough but concise.\n\nConversation:\n{}", to_think, conversation_text)
         ));
@@ -1533,7 +1544,10 @@ async fn handle_user_commands(user_input: &str, session: &mut ConversationSessio
             }
             Err(e) => {
                 eprintln!("{}: {}", "Error during deep thinking".red(), e);
-                session.messages.push(Message::Assistant(format!("Error during deep thinking: {}", e)));
+                session.messages.push(Message::Assistant(format!(
+                    "Error during deep thinking: {}",
+                    e
+                )));
             }
         }
         CommandResult::Continue
@@ -1556,9 +1570,10 @@ async fn handle_user_commands(user_input: &str, session: &mut ConversationSessio
                 match execute_setup_commands().await {
                     Ok(output) => {
                         if !output.is_empty() {
-                            session.messages.push(Message::Assistant(
-                                format!("Setup commands re-executed:\n{}", output)
-                            ));
+                            session.messages.push(Message::Assistant(format!(
+                                "Setup commands re-executed:\n{}",
+                                output
+                            )));
                         }
                     }
                     Err(e) => eprintln!("Error executing setup commands: {}", e),
@@ -1716,19 +1731,20 @@ By following these guidelines and effectively using the provided tools, you can 
             Ok(content) => format!("Previous memories:\n{}\n\n", content),
             Err(_) => String::new(),
         };
-        
+
         // Combine memories with preamble
-        session.messages.push(Message::System(
-            format!("{}{}", memories, preamble)
-        ));
-        
+        session
+            .messages
+            .push(Message::System(format!("{}{}", memories, preamble)));
+
         // Execute setup commands if any
         match execute_setup_commands().await {
             Ok(output) => {
                 if !output.is_empty() {
-                    session.messages.push(Message::Assistant(
-                        format!("Initial system setup results:\n{}", output)
-                    ));
+                    session.messages.push(Message::Assistant(format!(
+                        "Initial system setup results:\n{}",
+                        output
+                    )));
                 }
             }
             Err(e) => eprintln!("Error executing setup commands: {}", e),
@@ -1786,15 +1802,24 @@ By following these guidelines and effectively using the provided tools, you can 
             }
         };
 
+        session
+        .messages
+        .push(Message::Assistant(assistant_response.clone()));
 
         // 4) Process tool calls once and display results
         let tool_results = process_tool_calls(&mut session, assistant_response.clone()).await?;
-        
+
         // 5) Add tool results to conversation
-        session.messages.push(Message::Assistant(tool_results.clone()));
-        
+        session
+            .messages
+            .push(Message::Assistant(tool_results.clone()));
+
         // 6) Display combined response
-        println!("{} {}", "[Assistant]".blue().bold(), assistant_response.clone());
+        println!(
+            "{} {}",
+            "[Assistant]".blue().bold(),
+            assistant_response.clone()
+        );
         if !tool_results.is_empty() {
             println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
         }
