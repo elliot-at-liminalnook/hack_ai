@@ -526,7 +526,7 @@ async fn run_bash_command(command: &str) -> Result<String> {
 
     // Run command with timeout
     let output = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(5),
         tokio::process::Command::new("bash")
             .arg("-c")
             .arg(command)
@@ -1629,11 +1629,11 @@ Here are the available tools and their usage:
       * `<search query="latest cybersecurity threats" count="3" safe_search="false" />`
    * **Tool Response:** The tool will return a formatted text block containing a list of search results, including URLs and descriptions.
 
-2. **`<bash>` Tool:** Used to execute commands in a bash shell. **Use this tool with caution and only when necessary for system-level tasks.**
+2. **`<bash>` Tool:** Used to execute commands in a bash shell. 
 
    * **Call Format:** 
-     - For immediate commands: `<bash command="..." args="..." />`
-     - For background/long-running tasks: `<bash command="..." args="..." background="true" label="mylabel" />`
+     - For immediate commands (under 5 seconds to run): `<bash command="..." args="..." />`
+     - For background/long-running tasks (over 5 seconds to run): `<bash command="..." args="..." background="true" label="mylabel" />`
    * **Parameters:**
       * `command` (required): The base bash command to execute (e.g., `ls`, `ping`, `curl`). **Avoid potentially harmful commands like `rm`, `mv`, `dd`, `shutdown`, `reboot`, `kill`.**
       * `args` (optional): Space-separated arguments for the command.
