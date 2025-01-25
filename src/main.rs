@@ -1806,9 +1806,75 @@ By following these guidelines and effectively using the provided tools, you can 
         println!("{} {}", "[User]".green().bold(), user_input);
         session.messages.push(Message::User(user_input.clone()));
 
+        // Add background job status information
+        {
+            let active_jobs = {
+                let pm = PROCESS_MANAGER.read().await;
+                pm.processes.keys().cloned().collect::<Vec<_>>()
+            };
+
+            let mut status_messages = Vec::new();
+            let mut labels_to_remove = Vec::new();
+
+            for label in active_jobs {
+                let Some((status, stdout, stderr)) = ({
+                    let mut pm = PROCESS_MANAGER.write().await;
+                    match pm.get_logs(&label).await {
+                        Ok((status, stdout, stderr)) => {
+                            // Only report completed or errored processes
+                            if matches!(&status, BackgroundStatus::Completed(_) | BackgroundStatus::Error(_)) {
+                                labels_to_remove.push(label.clone());
+                                Some((status, stdout, stderr))
+                            } else {
+                                None
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                }) else {
+                    continue;
+                };
+
+                let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());
+                status_msg.push_str(&match status {
+                    BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),
+                    BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),
+                    _ => unreachable!(),
+                });
+
+                if !stdout.is_empty() {
+                    let lines: Vec<&str> = stdout.split('\n').collect();
+                    let recent = lines.len().saturating_sub(100);
+                    status_msg.push_str("\nLast stdout:\n");
+                    status_msg.push_str(&lines[recent..].join("\n"));
+                }
+
+                if !stderr.is_empty() {
+                    let lines: Vec<&str> = stderr.split('\n').collect();
+                    let recent = lines.len().saturating_sub(100);
+                    status_msg.push_str("\nLast stderr:\n");
+                    status_msg.push_str(&lines[recent..].join("\n"));
+                }
+
+                status_messages.push(status_msg);
+            }
+
+            // Add all collected status messages as system messages for LLM context
+            for msg in status_messages {
+                session.messages.push(Message::System(msg));
+            }
+
+            // Remove completed/errored processes from manager
+            if !labels_to_remove.is_empty() {
+                let mut pm = PROCESS_MANAGER.write().await;
+                for label in labels_to_remove {
+                    pm.processes.remove(&label);
+                }
+            }
+        }
+
         // Add context as assistant messages
         let recent_vars = session.recent_vars();
-
         if !recent_vars.is_empty() {
             session.messages.push(Message::System(format!(
                 "Recent variables:\n{}",
