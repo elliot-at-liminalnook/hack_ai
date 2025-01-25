@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::io::Write;
+use tokio::io::AsyncWriteExt;
 
 /// Append to memories.txt file
 async fn append_to_memories(memory: &str) -> Result<()> {
