@@ -1188,6 +1188,51 @@ pub async fn process_tool_calls(
         }
     }
 
+
+         // Add automatic status reporting with logs to messages                                                                                                                       
+         let active_jobs = {                                                                                                                                                           
+            let pm = PROCESS_MANAGER.read().await;                                                                                                                                    
+            pm.processes.keys().cloned().collect::<Vec<_>>()                                                                                                                          
+        };                                                                                                                                                                            
+                                                                                                                                                                                      
+        for label in active_jobs {                                                                                                                                                    
+            let logs = {                                                                                                                                                              
+                let mut pm = PROCESS_MANAGER.write().await;                                                                                                                           
+                pm.get_logs(&label).await                                                                                                                                             
+            };                                                                                                                                                                        
+                                                                                                                                                                                      
+            if let Ok((status, stdout, stderr)) = logs {                                                                                                                              
+                // Create status message                                                                                                                                              
+                let mut status_msg = format!("Background Job '{}' Status:\n", label.cyan().bold());                                                                                   
+                                                                                                                                                                                      
+                // Add status                                                                                                                                                         
+                status_msg.push_str(&match status {                                                                                                                                   
+                    BackgroundStatus::Running => "🟢 RUNNING\n",                                                                                                                      
+                    BackgroundStatus::Completed(c) => &format!("🔵 COMPLETED (exit code {})\n", c),                                                                                    
+                    BackgroundStatus::Error(e) => &format!("🔴 ERROR: {}\n", e),                                                                                                       
+                });                                                                                                                                                                   
+                                                                                                                                                                                      
+                // Add recent logs (last 5 lines each)                                                                                                                                
+                if !stdout.is_empty() {                                                                                                                                               
+                    let lines: Vec<&str> = stdout.split('\n').collect();                                                                                                              
+                    let recent = lines.len().saturating_sub(5);                                                                                                                       
+                    status_msg.push_str("\nLast stdout:\n");                                                                                                                          
+                    status_msg.push_str(&lines[recent..].join("\n"));                                                                                                                 
+                }                                                                                                                                                                     
+                                                                                                                                                                                      
+                if !stderr.is_empty() {                                                                                                                                               
+                    let lines: Vec<&str> = stderr.split('\n').collect();                                                                                                              
+                    let recent = lines.len().saturating_sub(5);                                                                                                                       
+                    status_msg.push_str("\nLast stderr:\n");                                                                                                                          
+                    status_msg.push_str(&lines[recent..].join("\n"));                                                                                                                 
+                }                                                                                                                                                                     
+                                                                                                                                                                                      
+                // Add to session messages and tool results                                                                                                                           
+                session.messages.push(Message::Assistant(status_msg.clone()));                                                                                                        
+                tool_results_text.push_str(&format!("\n\n{}", status_msg));                                                                                                           
+            }                                                                                                                                                                         
+        }   
+
     // Return tool outputs
     Ok(format!("{}", tool_results_text))
 }
