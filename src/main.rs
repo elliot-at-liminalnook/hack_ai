@@ -1228,14 +1228,14 @@ pub async fn process_tool_calls(
 
             if !stdout.is_empty() {
                 let lines: Vec<&str> = stdout.split('\n').collect();
-                let recent = lines.len().saturating_sub(5);
+                let recent = lines.len().saturating_sub(100);
                 status_msg.push_str("\nLast stdout:\n");
                 status_msg.push_str(&lines[recent..].join("\n"));
             }
 
             if !stderr.is_empty() {
                 let lines: Vec<&str> = stderr.split('\n').collect();
-                let recent = lines.len().saturating_sub(5);
+                let recent = lines.len().saturating_sub(100);
                 status_msg.push_str("\nLast stderr:\n");
                 status_msg.push_str(&lines[recent..].join("\n"));
             }
@@ -1776,7 +1776,7 @@ By following these guidelines and effectively using the provided tools, you can 
         match execute_setup_commands().await {
             Ok(output) => {
                 if !output.is_empty() {
-                    session.messages.push(Message::Assistant(format!(
+                    session.messages.push(Message::System(format!(
                         "Initial system setup results:\n{}",
                         output
                     )));
@@ -1806,7 +1806,7 @@ By following these guidelines and effectively using the provided tools, you can 
         let recent_vars = session.recent_vars();
 
         if !recent_vars.is_empty() {
-            session.messages.push(Message::Assistant(format!(
+            session.messages.push(Message::System(format!(
                 "Recent variables:\n{}",
                 recent_vars
             )));
@@ -1847,7 +1847,7 @@ By following these guidelines and effectively using the provided tools, you can 
         // 5) Add tool results to conversation
         session
             .messages
-            .push(Message::Assistant(tool_results.clone()));
+            .push(Message::System(tool_results.clone()));
 
 
         println!("{} {}", "[Assistant]".blue().bold(), assistant_response);
