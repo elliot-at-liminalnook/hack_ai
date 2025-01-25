@@ -1579,6 +1579,30 @@ async fn handle_user_commands(
             }
         }
         CommandResult::Continue
+    } else if input_lower.starts_with("/run ") {
+        let command = user_input[5..].trim();
+        if command.is_empty() {
+            println!("{}", "Please provide a command to run".red());
+            return CommandResult::Continue;
+        }
+
+        let label = format!("job_{}", uuid::Uuid::new_v4());
+        match {
+            let mut pm = PROCESS_MANAGER.write().await;
+            pm.spawn_process(&label, command).await
+        } {
+            Ok(_) => {
+                let cmd_display = format!("$ {}", command.green().bold());
+                let status_display = format!(
+                    "Spawned background job '{}'\nUse {} to check status",
+                    label.cyan().bold(),
+                    format!("<bash_status label=\"{}\"/>", label).yellow()
+                );
+                println!("{}\n{}", cmd_display, status_display);
+            }
+            Err(e) => eprintln!("{}: {}", "ERROR".red().bold(), e),
+        }
+        CommandResult::Continue
     } else if input_lower == "/clear" {
         match summarize_conversation(session).await {
             Ok(summary) => {
