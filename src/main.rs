@@ -1179,25 +1179,6 @@ pub async fn process_tool_calls(
                     ));
                 }
 
-                ToolCall::BashBackground {
-                    label,
-                    command,
-                    args,
-                } => {
-                    let full_cmd = format!("{} {}", command, args.join(" "));
-                    let result = match {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.spawn_process(&label, &full_cmd).await
-                    } {
-                        Ok(_) => format!(
-                            "Spawned background job '{}' with command: {}",
-                            label, full_cmd
-                        ),
-                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
-                    };
-                    tool_results_text
-                        .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
-                }
 
                 ToolCall::BashStatus { label } => {
                     let status = {
@@ -1393,25 +1374,7 @@ async fn run_test_session(session_path: &str) -> Result<()> {
             let mut tool_results_text = String::new();
             for call in tool_calls {
                 match call {
-                    ToolCall::BashBackground {
-                        label,
-                        command,
-                        args,
-                    } => {
-                        let full_cmd = format!("{} {}", command, args.join(" "));
-                        let result = match {
-                            let mut pm = PROCESS_MANAGER.write().await;
-                            pm.spawn_process(&label, &full_cmd).await
-                        } {
-                            Ok(_) => format!(
-                                "Spawned background job '{}' with command: {}",
-                                label, full_cmd
-                            ),
-                            Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
-                        };
-                        tool_results_text
-                            .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
-                    }
+                    
 
                     ToolCall::BashStatus { label } => {
                         let status = {
@@ -1930,25 +1893,6 @@ By following these guidelines and effectively using the provided tools, you can 
         let mut tool_results_text = String::new();
         for call in tool_calls {
             match call {
-                ToolCall::BashBackground {
-                    label,
-                    command,
-                    args,
-                } => {
-                    let full_cmd = format!("{} {}", command, args.join(" "));
-                    let result = match {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.spawn_process(&label, &full_cmd).await
-                    } {
-                        Ok(_) => format!(
-                            "Spawned background job '{}' with command: {}",
-                            label, full_cmd
-                        ),
-                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
-                    };
-                    tool_results_text
-                        .push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
-                }
 
                 ToolCall::BashStatus { label } => {
                     let status = {
