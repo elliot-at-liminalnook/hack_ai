@@ -1200,7 +1200,7 @@ pub async fn process_tool_calls(
     let mut status_messages = Vec::new();
 
     for label in active_jobs {
-        let (status, stdout, stderr) = {
+        let Some((status, stdout, stderr)) = {
             let mut pm = PROCESS_MANAGER.write().await;
             match pm.get_logs(&label).await {
                 Ok((status, stdout, stderr)) => {
@@ -1214,6 +1214,8 @@ pub async fn process_tool_calls(
                 }
                 Err(_) => None,
             }
+        } else {
+            continue;
         };
 
         if let Some((status, stdout, stderr)) = status {
