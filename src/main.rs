@@ -1815,11 +1815,15 @@ By following these guidelines and effectively using the provided tools, you can 
             .push(Message::Assistant(tool_results.clone()));
 
         // 6) Display combined response
-        println!(
-            "{} {}",
-            "[Assistant]".blue().bold(),
-            assistant_response.clone()
-        );
+        let cleaned_response = Regex::new(r"<[^>]+>").unwrap()
+            .replace_all(&assistant_response, "")
+            .trim()
+            .to_string();
+
+        if !cleaned_response.is_empty() {
+            println!("{} {}", "[Assistant]".blue().bold(), cleaned_response);
+        }
+
         if !tool_results.is_empty() {
             println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
         }
