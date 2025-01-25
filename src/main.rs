@@ -1188,8 +1188,8 @@ pub async fn process_tool_calls(
         }
     }
 
-    // Return combined results of initial response and tool outputs
-    Ok(format!("{}\n\n{}", initial_response, tool_results_text))
+    // Return tool outputs
+    Ok(format!("{}", tool_results_text))
 }
 
 //
@@ -1413,7 +1413,7 @@ enum CommandResult {
 }
 
 /// Handle special commands like /exit, /remember, etc.
-async fn handle_special_command(user_input: &str, session: &mut ConversationSession, preamble: &str) -> CommandResult {
+async fn handle_user_commands(user_input: &str, session: &mut ConversationSession, preamble: &str) -> CommandResult {
     let input_lower = user_input.to_lowercase();
     
     if input_lower == "/exit" {
@@ -1697,7 +1697,7 @@ By following these guidelines and effectively using the provided tools, you can 
         let user_input = line?.trim().to_string();
 
         // Handle special commands first
-        match handle_special_command(&user_input, &mut session, preamble).await {
+        match handle_user_commands(&user_input, &mut session, preamble).await {
             CommandResult::Break => break,
             CommandResult::Continue => continue,
             CommandResult::Proceed => {} // Continue with normal processing
@@ -1750,7 +1750,7 @@ By following these guidelines and effectively using the provided tools, you can 
         session.messages.push(Message::Assistant(tool_results.clone()));
         
         // 6) Display combined response
-        println!("{} {}", "[Assistant]".blue().bold(), tool_results);
+        println!("{} {}", "[Assistant]".blue().bold(), assistant_response.clone());
         if !tool_results.is_empty() {
             println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
         }
