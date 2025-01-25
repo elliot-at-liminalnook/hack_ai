@@ -1,4 +1,17 @@
 use anyhow::{anyhow, Result};
+use std::io::Write;
+
+/// Append to memories.txt file
+async fn append_to_memories(memory: &str) -> Result<()> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open("memories.txt")
+        .await?;
+        
+    file.write_all(format!("{}\n", memory).as_bytes()).await?;
+    Ok(())
+}
 use clap::Parser;
 use colored::*;
 use html2text::from_read;
@@ -1594,8 +1607,16 @@ By following these guidelines and effectively using the provided tools, you can 
     // Load or initialize the conversation
     let mut session = load_session();
     if session.messages.is_empty() {
-        // Provide an initial system role instruction if none is present
-        session.messages.push(Message::System(preamble.to_string()));
+        // Read memories.txt if it exists
+        let memories = match tokio::fs::read_to_string("memories.txt").await {
+            Ok(content) => format!("Previous memories:\n{}\n\n", content),
+            Err(_) => String::new(),
+        };
+        
+        // Combine memories with preamble
+        session.messages.push(Message::System(
+            format!("{}{}", memories, preamble)
+        ));
         
         // Execute setup commands if any
         match execute_setup_commands().await {
@@ -1618,6 +1639,18 @@ By following these guidelines and effectively using the provided tools, you can 
         if user_input.to_lowercase() == "/exit" {
             println!("{}", "Goodbye!".green());
             break;
+        } else if user_input.to_lowercase().starts_with("/remember ") {
+            let memory = user_input[10..].trim();
+            if memory.is_empty() {
+                println!("{}", "Please provide something to remember".red());
+                continue;
+            }
+            
+            match append_to_memories(memory).await {
+                Ok(_) => println!("{}", "Added to memories.txt".green()),
+                Err(e) => eprintln!("{}: {}", "Error saving memory".red(), e),
+            }
+            continue;
         } else if user_input.to_lowercase().starts_with("/forget ") {
             // Extract what to forget
             let to_forget = user_input[8..].trim();
