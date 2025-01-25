@@ -1598,6 +1598,19 @@ async fn handle_user_commands(
                     }
                     Err(e) => eprintln!("Error executing setup commands: {}", e),
                 }
+
+
+                match tokio::fs::read_to_string("memories.txt").await {
+                    Ok(content) => {
+                        format!("Previous memories:\n{}\n\n", content); // Combine memories with preamble
+                        session.messages.push(Message::System(format!(
+                            "DON'T FORGET THESE MEMORIES RECORDED BY THE USER: {}",
+                            content
+                        )));
+                    }
+                    Err(_) => print!("Couldn't find any memories"),
+                };
+
                 println!("{}", "Conversation cleared and summarized.".green());
             }
             Err(e) => eprintln!("{}: {}", "Error summarizing conversation".red(), e),
