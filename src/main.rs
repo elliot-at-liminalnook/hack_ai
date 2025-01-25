@@ -1146,19 +1146,8 @@ pub async fn process_tool_calls(
                         ),
                         Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
                     };
-                    // Then show tool results
-                    println!(
-                        "{} {}",
-                        "[Tool Results]".yellow().bold(),
-                        format!(
-                            "{}\n{}\n",
-                            "==== [BASH BACKGROUND JOB] ====".yellow().bold(),
-                            result
-                        )
-                    );
                     tool_results_text.push_str(&format!(
-                        "{}\n{}\n",
-                        "==== [BASH BACKGROUND JOB] ====".yellow().bold(),
+                        "==== [BASH BACKGROUND] ====\n{}\n\n",
                         result
                     ));
                 }
@@ -1954,13 +1943,19 @@ By following these guidelines and effectively using the provided tools, you can 
                 }
                 ToolCall::Bash { command, args } => {
                     let full_cmd = format!("{} {}", command, args.join(" "));
-                    let result = match run_bash_command(&full_cmd).await {
-                        Ok(r) => r,
-                        Err(e) => format!("{}: {}", "BASH ERROR".red().bold(), e),
+                    let label = format!("job_{}", uuid::Uuid::new_v4());
+                    let result = match {
+                        let mut pm = PROCESS_MANAGER.write().await;
+                        pm.spawn_process(&label, &full_cmd).await
+                    } {
+                        Ok(_) => format!(
+                            "Spawned background job '{}' with command: {}\nUse <bash_status label=\"{}\"/> to check status",
+                            label, full_cmd, label
+                        ),
+                        Err(e) => format!("ERROR spawning background job '{}': {}", label, e),
                     };
                     tool_results_text.push_str(&format!(
-                        "{}\n{}\n",
-                        "==== [BASH COMMAND RESULTS] ====".yellow().bold(),
+                        "==== [BASH BACKGROUND] ====\n{}\n\n",
                         result
                     ));
                 }
