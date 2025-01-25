@@ -511,17 +511,25 @@ fn extract_reflection_blocks(text: &str) -> Vec<String> {
 // Summaries of Repetitive Tool Output
 // -----------------------------------------------------------------------------
 
-/// This function calls the LLM in a minimal "summarizer" context, returning bullet points.
-async fn summarize_tool_output(text: &str) -> Result<String> {
+/// This function calls the LLM to summarize tool output with conversation context
+async fn summarize_tool_output(session: &ConversationSession, text: &str) -> Result<String> {
     // If it's empty or short, just skip summarizing
     if text.trim().is_empty() {
         return Ok("".to_string());
     }
 
-    // Build a minimal session to ask for a summary
+    // Build a summary session with recent context
     let mut summary_sess = ConversationSession::new();
+    
+    // Include last 2 messages for context
+    let last_messages: Vec<_> = session.messages.iter().rev().take(2).collect();
+    for msg in last_messages.iter().rev() {
+        summary_sess.messages.push(msg.clone().clone());
+    }
+
+    // Add summarization instructions and tool output
     summary_sess.messages.push(Message::System(
-        "You are a summarizer. Summarize the following tool output in bullet points, focusing on key/unique items and brevity.".to_string()
+        "You are a summarizer. First review the recent conversation context, then summarize the following tool output in bullet points. Focus on key information relevant to the user's current task and previous messages. Be concise but preserve crucial details.".to_string()
     ));
     summary_sess.messages.push(Message::User(text.to_string()));
 
@@ -1278,7 +1286,7 @@ pub async fn process_tool_calls(
 
         // Summarize the tool results if they're large
         if tool_results_text.len() > 500 {
-            if let Ok(summary) = summarize_tool_output(&tool_results_text).await {
+            if let Ok(summary) = summarize_tool_output(session, &tool_results_text).await {
                 if !summary.is_empty() {
                     // Add to conversation
                     session.messages.push(Message::Assistant(format!(
