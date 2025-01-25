@@ -1209,15 +1209,22 @@ pub async fn process_tool_calls(
 
 
                 ToolCall::BashStatus { label } => {
-                    let status = {
+                    let logs = {
                         let mut pm = PROCESS_MANAGER.write().await;
-                        pm.refresh_status(&label).await
+                        pm.get_logs(&label).await
                     };
-                    let result = match status {
-                        Ok(st) => {
+                    let result = match logs {
+                        Ok((st, stdout, stderr)) => {
                             let pm = PROCESS_MANAGER.read().await;
                             if let Some(proc) = pm.processes.get(&label) {
-                                format!("Command: {}\nStatus for '{}': {:?}", proc.command, label, st)
+                                let mut output = format!("Command: {}\nStatus for '{}': {:?}\n", proc.command, label, st);
+                                if !stdout.is_empty() {
+                                    output.push_str(&format!("\nSTDOUT:\n{}\n", stdout));
+                                }
+                                if !stderr.is_empty() {
+                                    output.push_str(&format!("\nSTDERR:\n{}\n", stderr));
+                                }
+                                output
                             } else {
                                 format!("Status for '{}': {:?}", label, st)
                             }
