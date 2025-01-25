@@ -1202,6 +1202,8 @@ async fn job_info(session: &mut ConversationSession) -> Result<String> {
         pm.processes.keys().cloned().collect::<Vec<_>>()
     };
 
+    let print_last_n_lines = 500;
+
     let mut labels_to_remove = Vec::new();
     let mut status_messages = Vec::new();
     let mut tool_results_text = String::new();
@@ -1234,14 +1236,14 @@ async fn job_info(session: &mut ConversationSession) -> Result<String> {
 
         if !stdout.is_empty() {
             let lines: Vec<&str> = stdout.split('\n').collect();
-            let recent = lines.len().saturating_sub(100);
+            let recent = lines.len().saturating_sub(print_last_n_lines);
             status_msg.push_str(&format!("\n{}:\n", "Last STDOUT".blue().bold()));
             status_msg.push_str(&lines[recent..].join("\n"));
         }
 
         if !stderr.is_empty() {
             let lines: Vec<&str> = stderr.split('\n').collect();
-            let recent = lines.len().saturating_sub(100);
+            let recent = lines.len().saturating_sub(print_last_n_lines);
             status_msg.push_str(&format!("\n{}:\n", "Last STDERR".red().bold()));
             status_msg.push_str(&lines[recent..].join("\n"));
         }
