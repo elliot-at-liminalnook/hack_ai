@@ -1214,7 +1214,14 @@ pub async fn process_tool_calls(
                         pm.refresh_status(&label).await
                     };
                     let result = match status {
-                        Ok(st) => format!("Status for '{}': {:?}", label, st),
+                        Ok(st) => {
+                            let pm = PROCESS_MANAGER.read().await;
+                            if let Some(proc) = pm.processes.get(&label) {
+                                format!("Command: {}\nStatus for '{}': {:?}", proc.command, label, st)
+                            } else {
+                                format!("Status for '{}': {:?}", label, st)
+                            }
+                        },
                         Err(e) => format!("ERROR checking status: {}", e),
                     };
                     tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
