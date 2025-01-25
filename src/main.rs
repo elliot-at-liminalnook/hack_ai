@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use std::io::Write;
 use tokio::io::AsyncWriteExt;
 
 /// Append to memories.txt file
@@ -1207,9 +1206,9 @@ pub async fn process_tool_calls(
                                                                                                                                                                                       
                 // Add status                                                                                                                                                         
                 status_msg.push_str(&match status {                                                                                                                                   
-                    BackgroundStatus::Running => "🟢 RUNNING\n",                                                                                                                      
-                    BackgroundStatus::Completed(c) => &format!("🔵 COMPLETED (exit code {})\n", c),                                                                                    
-                    BackgroundStatus::Error(e) => &format!("🔴 ERROR: {}\n", e),                                                                                                       
+                    BackgroundStatus::Running => "🟢 RUNNING\n".to_string(),                                                                                                                      
+                    BackgroundStatus::Completed(c) => format!("🔵 COMPLETED (exit code {})\n", c),                                                                                    
+                    BackgroundStatus::Error(e) => format!("🔴 ERROR: {}\n", e),                                                                                                       
                 });                                                                                                                                                                   
                                                                                                                                                                                       
                 // Add recent logs (last 5 lines each)                                                                                                                                
