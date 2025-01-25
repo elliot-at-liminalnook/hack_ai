@@ -1244,9 +1244,9 @@ pub async fn process_tool_calls(
         }
     }
 
-    // Add all collected status messages
+    // Add all collected status messages as system messages for LLM context
     for msg in status_messages {
-        session.messages.push(Message::Assistant(msg.clone()));
+        session.messages.push(Message::System(msg.clone()));
         tool_results_text.push_str(&format!("\n\n{}", msg));
     }
 
