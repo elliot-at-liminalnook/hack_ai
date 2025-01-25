@@ -1190,6 +1190,14 @@ pub async fn process_tool_calls(
         }
     }
 
+
+    // Return tool outputs
+    Ok(format!("{}", tool_results_text))
+}
+
+
+fn job_info() {
+
     // Automatic status reporting for completed/errored processes
     let active_jobs = {
         let pm = PROCESS_MANAGER.read().await;
@@ -1257,11 +1265,7 @@ pub async fn process_tool_calls(
             pm.processes.remove(&label);
         }
     }
-
-    // Return tool outputs
-    Ok(format!("{}", tool_results_text))
 }
-
 //
 // -----------------------------------------------------------------------------
 // Session Persistence
