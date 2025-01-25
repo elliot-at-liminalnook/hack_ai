@@ -1605,6 +1605,26 @@ async fn handle_user_commands(
             Err(e) => eprintln!("{}: {}", "ERROR".red().bold(), e),
         }
         CommandResult::Continue
+    } else if input_lower.starts_with("/add ") {
+        let file_path = user_input[5..].trim();
+        if file_path.is_empty() {
+            println!("{}", "Please provide a file path".red());
+            return CommandResult::Continue;
+        }
+        
+        match tokio::fs::read_to_string(file_path).await {
+            Ok(contents) => {
+                session.messages.push(Message::System(format!(
+                    "File contents of {}:\n{}",
+                    file_path, contents
+                )));
+                println!("{} {}", "Added file contents to conversation:".green(), file_path);
+            }
+            Err(e) => {
+                eprintln!("{}: {}", "Error reading file".red(), e);
+            }
+        }
+        CommandResult::Continue
     } else if input_lower == "/clear" {
         match summarize_conversation(session).await {
             Ok(summary) => {
