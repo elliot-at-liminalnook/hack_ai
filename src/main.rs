@@ -1122,218 +1122,138 @@ fn estimate_conversation_size(session: &ConversationSession) -> usize {
 // Multi-Step Tool Calls with Reflection
 // -----------------------------------------------------------------------------
 
-/// Process tool calls in a loop, automatically re-invoking the LLM until <done/> or
-/// until we hit the max iteration limit. This is especially useful for multi-step pen-testing tasks.
-/// We always call `call_deepseek_api` with model="deepseek-chat" for normal conversation steps.
+/// Process tool calls once and return the results
 pub async fn process_tool_calls(
     session: &mut ConversationSession,
     initial_response: String,
 ) -> Result<String> {
-    let mut current_response = initial_response;
-    let mut iteration = 0;
-
-    loop {
-        iteration += 1;
-        if iteration > MAX_ITERATIONS {
-            return Ok(format!(
-                "{}: Reached maximum number of iterations ({})",
-                "STOPPED".red().bold(),
-                MAX_ITERATIONS
-            ));
-        }
-
-        // Check for completion condition
-        if current_response.contains("<done/>") {
-            return Ok(current_response.replace("<done/>", "").trim().to_string());
-        }
-
-        // Parse reflection blocks. We'll store them in the conversation (as "assistant" messages).
-        let reflection_blocks = extract_reflection_blocks(&current_response);
-        for block in reflection_blocks {
-            session
-                .messages
-                .push(Message::Assistant(format!("(reflection)\n{}", block)));
-        }
-
-        // Parse and execute tool calls
-        let tool_calls = parse_tool_calls(&current_response);
-        if tool_calls.is_empty() {
-            // No further tool calls to make. We'll consider this the final answer for now.
-            return Ok(current_response.trim().to_string());
-        }
-
-        let mut tool_results_text = String::new();
-
-        for call in tool_calls {
-            match call {
-                ToolCall::Bash { command, args } => {
-                    let full_cmd = format!("{} {}", command, args.join(" "));
-                    let label = format!("job_{}", uuid::Uuid::new_v4());
-                    let result = match {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.spawn_process(&label, &full_cmd).await
-                    } {
-                        Ok(_) => {
-                            let cmd_display = format!("$ {}", full_cmd.green().bold());
-                            let status_display = format!(
-                                "Spawned background job '{}'\nUse {} to check status",
-                                label.cyan().bold(),
-                                format!("<bash_status label=\"{}\"/>", label).yellow()
-                            );
-                            format!("{}\n{}", cmd_display, status_display)
-                        },
-                        Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [BASH BACKGROUND] ====\n{}\n\n",
-                        result
-                    ));
-                }
-                ToolCall::Search {
-                    query,
-                    count,
-                    safe_search,
-                } => {
-                    let result = match run_search(&query, count, safe_search).await {
-                        Ok(r) => {
-                            let query_display = format!("Search Query: {}", query.green().bold());
-                            format!("{}\n{}", query_display, r)
-                        },
-                        Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [SEARCH] ====\n{}\n\n",
-                        result
-                    ));
-                }
-
-
-                ToolCall::BashStatus { label } => {
-                    let logs = {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.get_logs(&label).await
-                    };
-                    let result = match logs {
-                        Ok((st, stdout, stderr)) => {
-                            let pm = PROCESS_MANAGER.read().await;
-                            if let Some(proc) = pm.processes.get(&label) {
-                                let mut output = format!("Command: {}\nStatus for '{}': {:?}\n", proc.command, label, st);
-                                if !stdout.is_empty() {
-                                    output.push_str(&format!("\nSTDOUT:\n{}\n", stdout));
-                                }
-                                if !stderr.is_empty() {
-                                    output.push_str(&format!("\nSTDERR:\n{}\n", stderr));
-                                }
-                                output
-                            } else {
-                                format!("Status for '{}': {:?}", label, st)
-                            }
-                        },
-                        Err(e) => format!("ERROR checking status: {}", e),
-                    };
-                    tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
-                }
-
-                ToolCall::BashLogs { label } => {
-                    let logs = {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.get_logs(&label).await
-                    };
-                    let result = match logs {
-                        Ok((st, out, err)) => {
-                            format!(
-                                "Logs for '{}':\nStatus: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
-                                label, st, out, err
-                            )
-                        }
-                        Err(e) => format!("ERROR fetching logs: {}", e),
-                    };
-                    tool_results_text.push_str(&format!("==== [BASH LOGS] ====\n{}\n\n", result));
-                }
-
-                ToolCall::BashTerminate { label } => {
-                    let result = {
-                        let mut pm = PROCESS_MANAGER.write().await;
-                        pm.terminate(&label).await
-                    };
-                    let msg = match result {
-                        Ok(_) => format!("Terminated background job '{}'.", label),
-                        Err(e) => format!("ERROR terminating '{}': {}", label, e),
-                    };
-                    tool_results_text.push_str(&format!("==== [BASH TERMINATE] ====\n{}\n\n", msg));
-                }
-                ToolCall::Scrape { url, render_js } => {
-                    let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
-                        Ok(r) => {
-                            let url_display = format!("Scraping URL: {}", url.green().bold());
-                            format!("{}\n{}", url_display, r)
-                        },
-                        Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
-                    };
-                    tool_results_text.push_str(&format!(
-                        "==== [SCRAPE] ====\n{}\n\n",
-                        result
-                    ));
-                }
-                ToolCall::GetVar { name } => {
-                    let result = match session.get_var(&name) {
-                        Some(value) => format!("Variable '{}': {}", name, value),
-                        None => format!("Variable '{}' not found", name),
-                    };
-                    tool_results_text
-                        .push_str(&format!("==== [GET VAR result] ====\n{}\n\n", result));
-                }
-                ToolCall::SetVar { name, value } => {
-                    session.set_var(name.clone(), value.clone());
-                    tool_results_text.push_str(&format!(
-                        "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
-                        name, value
-                    ));
-                }
-                ToolCall::ListVars => {
-                    let result = session.list_vars();
-                    tool_results_text
-                        .push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
-                }
-            }
-        }
-
-        // Summarize the tool results if they're large
-        if tool_results_text.len() > 500 {
-            if let Ok(summary) = summarize_tool_output(session, &tool_results_text).await {
-                if !summary.is_empty() {
-                    // Add to conversation
-                    session.messages.push(Message::Assistant(format!(
-                        "Summary of tool results:\n{}",
-                        summary
-                    )));
-                    // Also store in long_context
-                    session.append_to_long_context(
-                        "tool_summaries",
-                        &json!({
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "summary": summary
-                        }),
-                    );
-                }
-            }
-        }
-
-        // Add tool results as an assistant message so the LLM can see it
-        session.messages.push(Message::Assistant(format!(
-            "Tool results:\n{}",
-            tool_results_text
-        )));
-
-        // Now re-invoke the LLM with the updated conversation, using "deepseek-chat"
-        let next_response = timeout(
-            Duration::from_secs(300),
-            call_deepseek_api(session, "deepseek-chat"),
-        )
-        .await??;
-
-        current_response = next_response;
+    // Parse reflection blocks and store them
+    let reflection_blocks = extract_reflection_blocks(&initial_response);
+    for block in reflection_blocks {
+        session.messages.push(Message::Assistant(format!("(reflection)\n{}", block)));
     }
+
+    // Parse and execute tool calls once
+    let tool_calls = parse_tool_calls(&initial_response);
+    let mut tool_results_text = String::new();
+
+    for call in tool_calls {
+        match call {
+            ToolCall::Bash { command, args } => {
+                let full_cmd = format!("{} {}", command, args.join(" "));
+                let label = format!("job_{}", uuid::Uuid::new_v4());
+                let result = match {
+                    let mut pm = PROCESS_MANAGER.write().await;
+                    pm.spawn_process(&label, &full_cmd).await
+                } {
+                    Ok(_) => {
+                        let cmd_display = format!("$ {}", full_cmd.green().bold());
+                        let status_display = format!(
+                            "Spawned background job '{}'\nUse {} to check status",
+                            label.cyan().bold(),
+                            format!("<bash_status label=\"{}\"/>", label).yellow()
+                        );
+                        format!("{}\n{}", cmd_display, status_display)
+                    },
+                    Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
+                };
+                tool_results_text.push_str(&format!("==== [BASH BACKGROUND] ====\n{}\n\n", result));
+            }
+            ToolCall::Search { query, count, safe_search } => {
+                let result = match run_search(&query, count, safe_search).await {
+                    Ok(r) => {
+                        let query_display = format!("Search Query: {}", query.green().bold());
+                        format!("{}\n{}", query_display, r)
+                    },
+                    Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
+                };
+                tool_results_text.push_str(&format!("==== [SEARCH] ====\n{}\n\n", result));
+            }
+            ToolCall::BashStatus { label } => {
+                let logs = {
+                    let mut pm = PROCESS_MANAGER.write().await;
+                    pm.get_logs(&label).await
+                };
+                let result = match logs {
+                    Ok((st, stdout, stderr)) => {
+                        let pm = PROCESS_MANAGER.read().await;
+                        if let Some(proc) = pm.processes.get(&label) {
+                            let mut output = format!("Command: {}\nStatus for '{}': {:?}\n", proc.command, label, st);
+                            if !stdout.is_empty() {
+                                output.push_str(&format!("\nSTDOUT:\n{}\n", stdout));
+                            }
+                            if !stderr.is_empty() {
+                                output.push_str(&format!("\nSTDERR:\n{}\n", stderr));
+                            }
+                            output
+                        } else {
+                            format!("Status for '{}': {:?}", label, st)
+                        }
+                    },
+                    Err(e) => format!("ERROR checking status: {}", e),
+                };
+                tool_results_text.push_str(&format!("==== [BASH STATUS] ====\n{}\n\n", result));
+            }
+            ToolCall::BashLogs { label } => {
+                let logs = {
+                    let mut pm = PROCESS_MANAGER.write().await;
+                    pm.get_logs(&label).await
+                };
+                let result = match logs {
+                    Ok((st, out, err)) => {
+                        format!(
+                            "Logs for '{}':\nStatus: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
+                            label, st, out, err
+                        )
+                    }
+                    Err(e) => format!("ERROR fetching logs: {}", e),
+                };
+                tool_results_text.push_str(&format!("==== [BASH LOGS] ====\n{}\n\n", result));
+            }
+            ToolCall::BashTerminate { label } => {
+                let result = {
+                    let mut pm = PROCESS_MANAGER.write().await;
+                    pm.terminate(&label).await
+                };
+                let msg = match result {
+                    Ok(_) => format!("Terminated background job '{}'.", label),
+                    Err(e) => format!("ERROR terminating '{}': {}", label, e),
+                };
+                tool_results_text.push_str(&format!("==== [BASH TERMINATE] ====\n{}\n\n", msg));
+            }
+            ToolCall::Scrape { url, render_js } => {
+                let result = match run_scrape(&url, render_js.unwrap_or(true)).await {
+                    Ok(r) => {
+                        let url_display = format!("Scraping URL: {}", url.green().bold());
+                        format!("{}\n{}", url_display, r)
+                    },
+                    Err(e) => format!("{}: {}", "ERROR".red().bold(), e),
+                };
+                tool_results_text.push_str(&format!("==== [SCRAPE] ====\n{}\n\n", result));
+            }
+            ToolCall::GetVar { name } => {
+                let result = match session.get_var(&name) {
+                    Some(value) => format!("Variable '{}': {}", name, value),
+                    None => format!("Variable '{}' not found", name),
+                };
+                tool_results_text.push_str(&format!("==== [GET VAR result] ====\n{}\n\n", result));
+            }
+            ToolCall::SetVar { name, value } => {
+                session.set_var(name.clone(), value.clone());
+                tool_results_text.push_str(&format!(
+                    "==== [SET VAR result] ====\nSet '{}' to '{}'\n\n",
+                    name, value
+                ));
+            }
+            ToolCall::ListVars => {
+                let result = session.list_vars();
+                tool_results_text.push_str(&format!("==== [LIST VARS result] ====\n{}\n\n", result));
+            }
+        }
+    }
+
+    // Return combined results of initial response and tool outputs
+    Ok(format!("{}\n\n{}", initial_response, tool_results_text))
 }
 
 //
@@ -1948,57 +1868,14 @@ By following these guidelines and effectively using the provided tools, you can 
                 .push(Message::Assistant(format!("(reflection)\n{}", block)));
         }
 
-        // 4) Process tool calls using the dedicated function
+        // 4) Process tool calls once and display results
         let tool_results = process_tool_calls(&mut session, assistant_response.clone()).await?;
         
-        // 5) Display assistant response and tool results
-        if !tool_results.is_empty() {
-            println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
-        }
-
-        // 5) Summarize large tool output automatically
-        if tool_results.len() > 500 {
-            if let Ok(summary) = summarize_tool_output(&session, &tool_results).await {
-                if !summary.is_empty() {
-                    session.messages.push(Message::Assistant(format!(
-                        "Summary of tool results:\n{}",
-                        summary
-                    )));
-                    session.append_to_long_context(
-                        "tool_summaries",
-                        &json!({
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "summary": summary
-                        }),
-                    );
-                }
-            }
-        }
-
-        // If we had tool results, we can place them in conversation if they're not too large
-        if !tool_results.is_empty() {
-            if tool_results.len() <= MAX_TOOL_RESULT_SIZE {
-                session.messages.push(Message::Assistant(format!(
-                    "Tool results:\n{}",
-                    tool_results
-                )));
-            } else {
-                session.messages.push(Message::Assistant(
-                    "Tool results too large to store in session".to_string(),
-                ));
-            }
-        }
-
-        // 6) Add the assistant's raw response to the conversation
-        let final_response = assistant_response.clone();
-        session
-            .messages
-            .push(Message::Assistant(final_response.clone()));
-
-        // Display assistant response and tool results
-        if !final_response.is_empty() {
-            println!("{} {}", "[Assistant]".blue().bold(), final_response);
-        }
+        // 5) Add tool results to conversation
+        session.messages.push(Message::Assistant(tool_results.clone()));
+        
+        // 6) Display combined response
+        println!("{} {}", "[Assistant]".blue().bold(), tool_results);
         if !tool_results.is_empty() {
             println!("{} {}", "[Tool Results]".yellow().bold(), tool_results);
         }
