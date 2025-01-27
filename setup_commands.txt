@@ -1,0 +1,54 @@
+echo "=== Network Configuration ==="
+ip addr show
+ip route show
+cat /etc/resolv.conf
+
+echo "=== System Information ==="
+uname -a
+lsb_release -a
+id
+whoami
+pwd
+echo $PATH
+
+echo "=== Available Tools ==="
+which nmap
+which gobuster
+which ffuf
+which metasploit
+which sqlmap
+which hydra
+which john
+which hashcat
+which nikto
+which nuclei
+which dirb
+which wfuzz
+which curl
+which nc
+which socat
+which python
+which python3
+which php
+which perl
+which ruby
+which gcc
+
+echo "=== Security Tools Versions ==="
+nmap --version | head -n1
+gobuster version | head -n1
+python3 --version
+php --version | head -n1
+ruby --version
+gcc --version | head -n1
+searchsploit --version | head -n1
+
+echo "=== Local Directory Structure of hacking tools ==="
+ls -la
+ls -la /opt/
+ls -la ~/wordlists/
+tree ~/scripts -L 3 --filelimit 30 -I "venv"
+
+
+echo "=== HTB VPN Status ==="
+ip addr show tun0 2>/dev/null
